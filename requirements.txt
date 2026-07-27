@@ -1,0 +1,33 @@
+# 定点観測ストレス評価システム 依存パッケージ（宣言側）
+#
+# ここは「何が必要か」を書く場所。実機で使う厳密なバージョンは
+#   scripts/bootstrap.sh 実行後に  make freeze  で requirements.lock.txt に固める。
+# 本番(Raspberry Pi)では必ず lock ファイル側でインストールすること。
+#   pip install -r requirements.lock.txt
+# こうしないと pip がその時点の最新版を毎回取り直し、環境がGitHubと乖離する。
+
+# --- 画像処理・カメラ ---
+# HUD を画面表示するので GUI 付き。ヘッドレス運用なら opencv-python-headless に置換。
+opencv-python>=4.8,<5.0
+numpy>=1.24,<2.0
+
+# --- 顔ランドマーク / blendshapes ---
+mediapipe>=0.10.14,<0.11
+
+# --- 感情認識（ONNX 推論。軽量で Pi 向き）---
+hsemotion-onnx>=0.3
+onnxruntime>=1.16,<2.0
+
+# --- グラフ出力 ---
+matplotlib>=3.7,<4.0
+
+# --- 顔識別（SFace）---
+# 注意: deepface は tensorflow を引き込むため Pi では 500MB 級になる。
+#   Pi の容量・時間が厳しい場合は下2行をコメントアウトし、
+#   FACE_ID_BACKEND を "landmark" にするか、OpenCV の FaceRecognizerSF に
+#   置き換える（SFace の .onnx は既にDL済みなので tensorflow 不要で動かせる）。
+deepface>=0.0.89
+tf-keras>=2.15
+
+# --- 任意: 高精度顔認識（Windows ではコンパイラが必要）---
+# insightface>=0.7.3

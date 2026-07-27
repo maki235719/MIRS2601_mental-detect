@@ -1,9 +1,34 @@
+# ---- Python ----
 __pycache__/
-*.pyc
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---- 仮想環境（リポジトリ内に作らないのが原則。作っても追跡しない）----
+.venv/
+venv/
+env/
+
+# ---- ローカル設定・秘密情報 ----
+.env
+config.local.py
+
+# ---- モデル（初回起動時に自動DL。MIRS_MODEL_DIR にキャッシュされる）----
+*.task
+*.onnx
+*.tflite
+models/
+
+# ---- 実行時の生成物（MIRS_DATA_DIR に出るのが正だが、旧配置の名残も除外）----
 person_profiles.json
 session_history.jsonl
 stai_dataset.jsonl
 stress_log.csv
 stress_graph.png
 stress_config.json
-face_landmarker.task
+data/
+
+# ---- OS / エディタ ----
+.DS_Store
+Thumbs.db
+*.swp

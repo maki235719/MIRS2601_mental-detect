@@ -1,0 +1,18 @@
+# 改行コードを Git 側で LF に統一する。
+# これが無いと Windows(CRLF) と Raspberry Pi(LF) で全ファイルが「変更あり」に
+# 見えてしまい、pull のたびに「先に commit してください」で止まる。
+* text=auto eol=lf
+
+# シェルスクリプトは必ず LF（CRLF だと Pi で "bad interpreter" になる）
+*.sh   text eol=lf
+Makefile text eol=lf
+
+# PowerShell は Windows 専用なので CRLF
+*.ps1  text eol=crlf
+
+# バイナリは変換しない
+*.task binary
+*.onnx binary
+*.png  binary
+*.jpg  binary
+*.tflite binary
