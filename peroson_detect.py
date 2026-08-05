@@ -182,6 +182,7 @@ STRESS_CONFIG_PATH = os.path.join(OUTPUT_DIR, "stress_config.json")
 # STAI（状態不安STAI-S / 特性不安STAI-T）ラベルとセッション平均特徴の対応データセット。
 # collect モードで1セッション1レコード追記し、tune_stress.py がこれを読んでフィットする。
 STAI_DATASET_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.jsonl")
+STAI_CSV_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.csv")
 # STAI 質問紙の項目文・逆転項目・選択肢アンカーを外部化した編集可能ファイル。
 # survey モードで終了時にこの質問紙を提示し、逆転採点して STAI-S/-T を算出する。
 # 無ければ雛形（プレースホルダ項目文）を自動生成するので、正式な日本語項目文に差し替える。
@@ -189,6 +190,7 @@ STAI_ITEMS_PATH = os.path.join(OUTPUT_DIR, "stai_items.json")
 # 定点観測用の永続データ（人物ごとの顔埋め込み・平常状態統計）とセッション履歴
 PROFILES_JSON_PATH = os.path.join(OUTPUT_DIR, "person_profiles.json")
 SESSION_HISTORY_PATH = os.path.join(OUTPUT_DIR, "session_history.jsonl")
+SESSION_HISTORY_CSV_PATH = os.path.join(OUTPUT_DIR, "session_history.csv")
 FACE_LANDMARKER_TASK = os.path.join(OUTPUT_DIR, "face_landmarker.task")
 FACE_LANDMARKER_URL = (
     "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
@@ -1174,12 +1176,27 @@ class PersonStore:
                         "baseline_sessions": int(p.get("session_count", 0)),
                     }
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            print(f"セッション履歴を追記しました: {history_path}")
+                    _append_csv_row(
+                        SESSION_HISTORY_CSV_PATH,
+                        ["date", "person_id", "duration_sec", "samples", "mean_stress", "max_stress", "baseline_sessions"],
+                        [rec["date"], rec["person_id"], rec["duration_sec"], rec["samples"], rec["mean_stress"], rec["max_stress"], rec["baseline_sessions"]],
+                    )
+            print(f"セッション履歴を追記しました: {history_path} / {SESSION_HISTORY_CSV_PATH}")
 
 
 # ============================================================================
 # レポート保存
 # ============================================================================
+
+def _append_csv_row(path, header, row):
+    """CSVファイルに1行追記する。無ければヘッダー行を先に書く（Excel向けにBOM付き）。"""
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(header)
+        writer.writerow(row)
+
 
 def save_stress_report(stress_history):
     """セッション終了時にストレススコアの時系列をCSVとグラフ画像に保存する"""
@@ -1719,6 +1736,17 @@ def _prompt_stai(label):
     return val
 
 
+def append_stai_record(rec):
+    """rec を stai_dataset.jsonl（tune_stress.py用）と stai_dataset.csv（閲覧用）の両方に追記する。"""
+    with open(STAI_DATASET_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    header = ["date", "person_id", "stai_state", "stai_trait",
+              "duration_sec", "samples", "mean_stress"] + [f"z_{k}" for k in _FEATURES]
+    row = [rec["date"], rec["person_id"], rec["stai_state"], rec["stai_trait"],
+           rec["duration_sec"], rec["samples"], rec["mean_stress"]] + [rec["z"][k] for k in _FEATURES]
+    _append_csv_row(STAI_CSV_PATH, header, row)
+
+
 def collect_stai_labels(session_summaries):
     """セッション終了時に人物ごとの STAI-S/-T を入力させ、セッション平均zと一緒に
     stai_dataset.jsonl へ1レコードずつ追記する（STAI-S が入力された人物のみ保存）。"""
@@ -1749,11 +1777,10 @@ def collect_stai_labels(session_summaries):
             "mean_stress": round(s["sum"] / n, 2),
             "z": {f: round(s["z_sum"][f] / n, 4) for f in _FEATURES},
         }
-        with open(STAI_DATASET_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        append_stai_record(rec)
         saved += 1
     if saved:
-        print(f"\nSTAI ラベルを {saved} 件記録しました: {STAI_DATASET_PATH}")
+        print(f"\nSTAI ラベルを {saved} 件記録しました: {STAI_DATASET_PATH} / {STAI_CSV_PATH}")
         print("十分たまったら `python tune_stress.py --report` で相関を確認できます。")
     else:
         print("\nSTAI ラベルは記録されませんでした。")
@@ -1946,11 +1973,10 @@ def run_stai_survey(session_summaries):
             "mean_stress": round(s["sum"] / n, 2),
             "z": {f: round(s["z_sum"][f] / n, 4) for f in _FEATURES},
         }
-        with open(STAI_DATASET_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        append_stai_record(rec)
         saved += 1
     if saved:
-        print(f"\nSTAI 得点を自動採点して {saved} 件記録しました: {STAI_DATASET_PATH}")
+        print(f"\nSTAI 得点を自動採点して {saved} 件記録しました: {STAI_DATASET_PATH} / {STAI_CSV_PATH}")
         print("十分たまったら `python tune_stress.py --report` で相関を確認できます。")
     else:
         print("\nSTAI 得点は記録されませんでした。")
