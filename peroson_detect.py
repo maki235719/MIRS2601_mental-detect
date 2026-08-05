@@ -222,6 +222,11 @@ CORAL_DEVICE = ""  # 複数Coral接続時の識別子（例 ":0"）。空なら�
 #               算出した STAI-S/-T をデータセットへ保存（別紙での実施・手入力が不要）。
 RUN_MODE = "run"
 
+# collect モードでの STAI-S 入力形式（stress_config.json の "stai_s_form" で切替）:
+#   "full"   = 従来どおり別紙採点済みの STAI-S(20-80) をそのまま入力（既定）
+#   "short6" = 短縮版 STAI-S6(6-24) を入力し、20/6倍で 20-80 スケールに正規化
+STAI_S_FORM = "full"
+
 
 # ============================================================================
 # 設定ファイル（チューニング可能パラメータの外部化）
@@ -231,6 +236,7 @@ def _default_stress_config():
     """現行のハードコード値から config 雛形（辞書）を組み立てる。"""
     return {
         "mode": RUN_MODE,
+        "stai_s_form": STAI_S_FORM,
         "weights": dict(STRESS_COMPONENT_WEIGHTS),
         "base_level": STRESS_BASE_LEVEL,
         "z_gain": STRESS_Z_GAIN,
@@ -254,7 +260,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
     """stress_config.json を読み、ストレス合成のパラメータ（重み・ゲイン・基準・分散下限）と
     実行モードをモジュール全体へ反映する。ファイルが無ければ現行値で雛形を書き出して従来どおり動く。
     tune_stress.py が書き戻したチューニング結果を、ここで一元的に取り込む。"""
-    global STRESS_BASE_LEVEL, STRESS_Z_GAIN, RUN_MODE
+    global STRESS_BASE_LEVEL, STRESS_Z_GAIN, RUN_MODE, STAI_S_FORM
     global EMO_STD_FLOOR, BROW_STD_FLOOR, BLINK_STD_FLOOR
     global HEAD_STD_FLOOR, MOUTH_STD_FLOOR, EYE_STD_FLOOR
     global CORAL_ENABLED, CORAL_MODEL_PATH, CORAL_DEVICE
@@ -276,6 +282,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
         return
 
     RUN_MODE = str(cfg.get("mode", RUN_MODE)).lower()
+    STAI_S_FORM = str(cfg.get("stai_s_form", STAI_S_FORM)).lower()
 
     # 重み（キーは既存のものだけ採用し、欠けは現行値を維持）
     for k, v in (cfg.get("weights") or {}).items():
@@ -313,7 +320,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
     # 分散下限を参照するテーブル（後段で定義済み）も同期しておく。
     _sync_feature_std_floors()
     print(
-        f"設定を読み込みました（mode={RUN_MODE}）: "
+        f"設定を読み込みました（mode={RUN_MODE}, stai_s_form={STAI_S_FORM}）: "
         f"weights={STRESS_COMPONENT_WEIGHTS}, base={STRESS_BASE_LEVEL}, gain={STRESS_Z_GAIN}, "
         f"coral={'ON' if CORAL_ENABLED else 'OFF'}"
     )
@@ -1748,8 +1755,8 @@ def main():
             print(f"人物プロファイルの保存に失敗しました: {e}")
 
 
-def _prompt_stai(label):
-    """STAI 得点(20-80)をコンソールから読む。空欄/範囲外/非数値は None を返す。"""
+def _prompt_stai(label, min_val=20.0, max_val=80.0):
+    """STAI 得点などをコンソールから読む。空欄/範囲外/非数値は None を返す。"""
     try:
         raw = input(label).strip()
     except EOFError:
@@ -1761,8 +1768,8 @@ def _prompt_stai(label):
     except ValueError:
         print("  数値ではないためスキップしました。")
         return None
-    if not (20.0 <= val <= 80.0):
-        print("  STAI は 20〜80 の範囲です。範囲外のためスキップしました。")
+    if not (min_val <= val <= max_val):
+        print(f"  入力値は {min_val}〜{max_val} の範囲である必要があります。範囲外のためスキップしました。")
         return None
     return val
 
@@ -1796,10 +1803,17 @@ def collect_stai_labels(session_summaries):
         if n <= 0:
             continue
         print(f"\n[人物 ID={pid}] このセッションの平均ストレス {s['sum'] / n:.1f} / 100")
-        stai_s = _prompt_stai("  STAI-S 状態不安 (20-80, 空欄=この人物をスキップ): ")
-        if stai_s is None:
-            print("  → スキップしました。")
-            continue
+        if STAI_S_FORM == "short6":
+            stai_s6 = _prompt_stai("  STAI-S6 状態不安 (短縮版 6-24, 空欄=この人物をスキップ): ", 6.0, 24.0)
+            if stai_s6 is None:
+                print("  → スキップしました。")
+                continue
+            stai_s = stai_s6 * (20.0 / 6.0)  # 20〜80のスケールに正規化
+        else:
+            stai_s = _prompt_stai("  STAI-S 状態不安 (20-80, 空欄=この人物をスキップ): ")
+            if stai_s is None:
+                print("  → スキップしました。")
+                continue
         stai_t = _prompt_stai("  STAI-T 特性不安 (20-80, 空欄=可): ")
         rec = {
             "date": now,
