@@ -1132,8 +1132,11 @@ class PersonStore:
             welford_update(bl["blink"], float(blink_rate))  # 平常瞬目率（1セッション1サンプル）
         return self.baseline_dict(pid)
 
-    def save(self, path, gallery, session_summaries, history_path):
-        """最新の埋め込み・session_count を書き戻し、セッション履歴(JSONL)を追記する。"""
+    def save(self, path, gallery, session_summaries, history_path, stai_by_pid=None):
+        """最新の埋め込み・session_count を書き戻し、セッション履歴(JSONL/CSV)を追記する。
+        stai_by_pid が渡されれば（collect/surveyモードで人物ごとに回答済みなら）、
+        そのセッションで得た STAI-S/-T を履歴の同じ行に一緒に記録する。"""
+        stai_by_pid = stai_by_pid or {}
         now = datetime.now().isoformat(timespec="seconds")
         for pid, emb in (gallery or {}).items():
             pid = int(pid)
@@ -1166,6 +1169,7 @@ class PersonStore:
             with open(history_path, "a", encoding="utf-8") as f:
                 for pid, s in session_summaries.items():
                     p = self.persons.get(int(pid), {})
+                    stai = stai_by_pid.get(int(pid), {})
                     rec = {
                         "date": now,
                         "person_id": int(pid),
@@ -1174,12 +1178,16 @@ class PersonStore:
                         "mean_stress": round(s["mean_stress"], 1),
                         "max_stress": round(s["max_stress"], 1),
                         "baseline_sessions": int(p.get("session_count", 0)),
+                        "stai_state": stai.get("stai_state"),
+                        "stai_trait": stai.get("stai_trait"),
                     }
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+                    header = ["date", "person_id", "duration_sec", "samples", "mean_stress",
+                               "max_stress", "baseline_sessions", "stai_state", "stai_trait"]
                     _append_csv_row(
                         SESSION_HISTORY_CSV_PATH,
-                        ["date", "person_id", "duration_sec", "samples", "mean_stress", "max_stress", "baseline_sessions"],
-                        [rec["date"], rec["person_id"], rec["duration_sec"], rec["samples"], rec["mean_stress"], rec["max_stress"], rec["baseline_sessions"]],
+                        header,
+                        [rec[h] for h in header],
                     )
             print(f"セッション履歴を追記しました: {history_path} / {SESSION_HISTORY_CSV_PATH}")
 
@@ -1189,7 +1197,25 @@ class PersonStore:
 # ============================================================================
 
 def _append_csv_row(path, header, row):
-    """CSVファイルに1行追記する。無ければヘッダー行を先に書く（Excel向けにBOM付き）。"""
+    """CSVファイルに1行追記する。無ければヘッダー行を先に書く（Excel向けにBOM付き）。
+    既存ファイルの列がヘッダーと食い違う場合（列を追加した等）は、既存行を新ヘッダーに
+    合わせて移行してから追記する（列名で対応付け、無い列は空欄）。"""
+    if os.path.exists(path):
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            existing = list(csv.reader(f))
+        if existing and existing[0] != header:
+            old_header, old_rows = existing[0], existing[1:]
+            idx = {name: i for i, name in enumerate(old_header)}
+            migrated = [
+                [r[idx[h]] if h in idx and idx[h] < len(r) else "" for h in header]
+                for r in old_rows
+            ]
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(migrated)
+                writer.writerow(row)
+            return
     write_header = not os.path.exists(path)
     with open(path, "a", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
@@ -1696,25 +1722,30 @@ def main():
         }
         if id_tracker is not None:
             store.next_id = id_tracker.next_id
-        try:
-            store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
-                       session_summaries=summaries, history_path=SESSION_HISTORY_PATH)
-        except Exception as e:
-            print(f"人物プロファイルの保存に失敗しました: {e}")
 
         # 終了時のSTAIラベル付け。ここで貯めた (セッション平均z, STAI) のペアを
         # tune_stress.py が学習に使う。モードにより採点済み得点の手入力(collect)か、
         # アプリ内での質問紙実施＋自動採点(survey)かを切り替える。
+        # store.save() より先に実施し、得られた STAI-S/-T を session_history にも
+        # 同じ行で残せるようにする。
+        stai_by_pid = {}
         if RUN_MODE == "collect":
             try:
-                collect_stai_labels(session_summaries)
+                stai_by_pid = collect_stai_labels(session_summaries)
             except Exception as e:
                 print(f"STAIラベルの記録に失敗しました: {e}")
         elif RUN_MODE == "survey":
             try:
-                run_stai_survey(session_summaries)
+                stai_by_pid = run_stai_survey(session_summaries)
             except Exception as e:
                 print(f"STAI 問診の実施に失敗しました: {e}")
+
+        try:
+            store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
+                       session_summaries=summaries, history_path=SESSION_HISTORY_PATH,
+                       stai_by_pid=stai_by_pid)
+        except Exception as e:
+            print(f"人物プロファイルの保存に失敗しました: {e}")
 
 
 def _prompt_stai(label):
@@ -1749,10 +1780,13 @@ def append_stai_record(rec):
 
 def collect_stai_labels(session_summaries):
     """セッション終了時に人物ごとの STAI-S/-T を入力させ、セッション平均zと一緒に
-    stai_dataset.jsonl へ1レコードずつ追記する（STAI-S が入力された人物のみ保存）。"""
+    stai_dataset.jsonl へ1レコードずつ追記する（STAI-S が入力された人物のみ保存）。
+    戻り値 {pid: {"stai_state":..,"stai_trait":..}} は session_history にも
+    同じ得点を残すため、呼び出し側(main)が store.save() に渡す。"""
+    results = {}
     if not session_summaries:
         print("このセッションでは評価サンプルが無いため、STAIの記録は行いません。")
-        return
+        return results
     print("\n=== STAI ラベル入力（collect モード）===")
     print("各人物について STAI 得点を入力してください（空欄でその人物をスキップ）。")
     saved = 0
@@ -1778,12 +1812,14 @@ def collect_stai_labels(session_summaries):
             "z": {f: round(s["z_sum"][f] / n, 4) for f in _FEATURES},
         }
         append_stai_record(rec)
+        results[int(pid)] = {"stai_state": stai_s, "stai_trait": stai_t}
         saved += 1
     if saved:
         print(f"\nSTAI ラベルを {saved} 件記録しました: {STAI_DATASET_PATH} / {STAI_CSV_PATH}")
         print("十分たまったら `python tune_stress.py --report` で相関を確認できます。")
     else:
         print("\nSTAI ラベルは記録されませんでした。")
+    return results
 
 
 # ============================================================================
@@ -1941,10 +1977,13 @@ def _prompt_scale_choice():
 
 def run_stai_survey(session_summaries):
     """survey モードの本体。終了時にアプリ内で STAI 質問紙を実施し、逆転採点して算出した
-    STAI-S/-T を、collect と同一 schema で stai_dataset.jsonl へ人物ごとに追記する。"""
+    STAI-S/-T を、collect と同一 schema で stai_dataset.jsonl へ人物ごとに追記する。
+    戻り値 {pid: {"stai_state":..,"stai_trait":..}} は session_history にも
+    同じ得点を残すため、呼び出し側(main)が store.save() に渡す。"""
+    results = {}
     if not session_summaries:
         print("このセッションでは評価サンプルが無いため、STAIの記録は行いません。")
-        return
+        return results
 
     items = load_stai_items()
     scale = _prompt_scale_choice()
@@ -1974,12 +2013,14 @@ def run_stai_survey(session_summaries):
             "z": {f: round(s["z_sum"][f] / n, 4) for f in _FEATURES},
         }
         append_stai_record(rec)
+        results[int(pid)] = {"stai_state": float(stai_s), "stai_trait": rec["stai_trait"]}
         saved += 1
     if saved:
         print(f"\nSTAI 得点を自動採点して {saved} 件記録しました: {STAI_DATASET_PATH} / {STAI_CSV_PATH}")
         print("十分たまったら `python tune_stress.py --report` で相関を確認できます。")
     else:
         print("\nSTAI 得点は記録されませんでした。")
+    return results
 
 
 if __name__ == "__main__":
