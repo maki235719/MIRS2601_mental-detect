@@ -26,9 +26,8 @@ from datetime import datetime
 
 import numpy as np
 
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-CONFIG_PATH = os.path.join(OUTPUT_DIR, "stress_config.json")
-DATASET_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.jsonl")
+from config import STRESS_CONFIG_PATH as CONFIG_PATH
+from config import STAI_DATASET_PATH as DATASET_PATH
 
 # 成分キー（データセット/z側） → config の重みキー（履歴上 emo↔emotion だけ名前が違う）
 FEATURES = ["emo", "brow", "blink", "head", "mouth", "eye"]
