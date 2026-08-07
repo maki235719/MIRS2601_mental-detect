@@ -30,10 +30,13 @@ import csv
 import json
 import os
 import platform
+import threading
 import time
 import urllib.request
+import webbrowser
 from collections import deque
 from datetime import datetime
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import cv2
 import numpy as np
@@ -124,6 +127,11 @@ from config import (
     CORAL_DEVICE,
     RUN_MODE,
     DEMO_NO_RECORD,
+    FACE_PROFILE_PERSIST_ENABLED,
+    CONSENT_RECORD_JSON_PATH,
+    CONSENT_RECORD_CSV_PATH,
+    SELFCHECK_HTML_PATH,
+    SELFCHECK_SERVER_PORT,
     STAI_S_FORM,
     STAI_SCALE_MIN,
     STAI_SCALE_MAX,
@@ -1133,6 +1141,90 @@ def _append_csv_row(path, header, row):
         writer.writerow(row)
 
 
+# ============================================================================
+# セルフチェックHTML配信サーバ（同意書準拠モード）
+# ============================================================================
+# スペースキーで記録を始めると同時に、ローカル(127.0.0.1)だけで待受けるこの
+# サーバがブラウザにセルフチェックHTMLを配信する。参加者が回答して送信すると
+# POST /submit でスコアを受け取り、記録停止時にターミナル側が取り出して
+# ストレス推定結果と一緒に記録する。外部への通信は一切行わない。
+
+class SelfcheckServer:
+    """1ページ(GET /)を配信し、送信結果(POST /submit)を保持するだけの最小サーバ。"""
+
+    def __init__(self, html_path, port):
+        with open(html_path, "r", encoding="utf-8") as f:
+            self._html = f.read().encode("utf-8")
+        self._lock = threading.Lock()
+        self._score = None
+        outer = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def log_message(self, *args):
+                pass  # アクセスログは出さない
+
+            def do_GET(self):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(outer._html)))
+                self.end_headers()
+                self.wfile.write(outer._html)
+
+            def do_POST(self):
+                if self.path != "/submit":
+                    self.send_response(404)
+                    self.end_headers()
+                    return
+                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    data = json.loads(self.rfile.read(length) or b"{}")
+                    score = float(data["score"])
+                except Exception:
+                    self.send_response(400)
+                    self.end_headers()
+                    return
+                with outer._lock:
+                    outer._score = score
+                body = b'{"ok": true}'
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        self.httpd = ThreadingHTTPServer(("127.0.0.1", port), Handler)
+        self.port = port
+        self._thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+
+    def start(self):
+        self._thread.start()
+
+    def stop(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+    def reset(self):
+        """次の記録セグメント用に、前回の送信結果を捨てる。"""
+        with self._lock:
+            self._score = None
+
+    def take_score(self):
+        """保持しているスコアを取り出して消費する（未送信なら None）。"""
+        with self._lock:
+            score, self._score = self._score, None
+            return score
+
+
+def append_consent_record(rec):
+    """rec を consent_session_records.jsonl / .csv の両方に即時追記する。
+    person_id・zスコア等の顔特徴量は含めず、匿名の集計結果のみを残す。"""
+    with open(CONSENT_RECORD_JSON_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    header = ["date", "segment", "duration_sec", "samples", "mean_stress",
+              "max_stress", "selfcheck_stai_s6_raw", "selfcheck_stai_s"]
+    _append_csv_row(CONSENT_RECORD_CSV_PATH, header, [rec.get(h) for h in header])
+
+
 def save_stress_report(stress_history):
     """セッション終了時にストレススコアの時系列をCSVとグラフ画像に保存する"""
     if not stress_history:
@@ -1241,8 +1333,13 @@ def main():
 
     # 永続化された人物プロファイル（顔埋め込み・平常状態統計）を読み込み、
     # トラッカへ既知人物を注入する（セッションをまたいで同じ顔に同じID＝定点観測）。
-    store = PersonStore.load(PROFILES_JSON_PATH, face_id_backend_tag(id_backend))
-    if id_tracker is not None:
+    # 同意書は体験終了時に顔特徴量の結びつきを解除・削除することを求めているため、
+    # FACE_PROFILE_PERSIST_ENABLED が False の間はセッションをまたいだ読み込みを行わない。
+    store = PersonStore.load(
+        PROFILES_JSON_PATH if FACE_PROFILE_PERSIST_ENABLED else "",
+        face_id_backend_tag(id_backend),
+    )
+    if FACE_PROFILE_PERSIST_ENABLED and id_tracker is not None:
         id_tracker.seed(store.gallery_for_seed(), store.next_id)
         known = len(store.gallery_for_seed())
         if known:
@@ -1253,9 +1350,22 @@ def main():
     }
     person_baselines = {pid: bl for pid, bl in person_baselines.items() if bl is not None}
 
+    # セルフチェックHTML配信サーバ（同意書準拠モード）。ローカル(127.0.0.1)専用。
+    selfcheck_server = None
+    if os.path.exists(SELFCHECK_HTML_PATH):
+        try:
+            selfcheck_server = SelfcheckServer(SELFCHECK_HTML_PATH, SELFCHECK_SERVER_PORT)
+            selfcheck_server.start()
+        except Exception as e:
+            print(f"セルフチェックHTMLサーバの起動に失敗しました: {e}")
+    else:
+        print(f"セルフチェックHTMLが見つかりません: {SELFCHECK_HTML_PATH}")
+
     cap = cv2.VideoCapture(0)  # 0 = 既定のカメラ
     if not cap.isOpened():
         print("カメラを開けませんでした。デバイス番号や接続を確認してください。")
+        if selfcheck_server is not None:
+            selfcheck_server.stop()
         landmarker.close()
         return
 
@@ -1293,6 +1403,39 @@ def main():
     stress_history = []
     # 人物ごとのセッション要約（session_history.jsonl / プロファイル更新に使う）
     session_summaries = {}         # pid -> {"samples","sum","max","first_t","last_t"}
+
+    # スペースキーで区切って記録する同意書準拠モード。区間ごとの集計値のみを保持し、
+    # 生の顔特徴量（zスコアや時系列そのもの）は蓄積しない。
+    recording = False
+    segment_summary = None         # {"samples","sum","max","first_t","last_t"}
+    segment_no = 0
+
+    def _finish_recording_segment():
+        """記録中の区間を締め、匿名の集計結果を即時保存する（呼び出し後に外側でカウンタ更新）。"""
+        nonlocal segment_no
+        n = segment_summary["samples"]
+        if n <= 0:
+            print("記録区間内に顔が検出されなかったため、この区間は保存しません。")
+            return
+        selfcheck_score = selfcheck_server.take_score() if selfcheck_server else None
+        rec = {
+            "date": datetime.now().isoformat(timespec="seconds"),
+            "segment": segment_no,
+            "duration_sec": round(max(0.0, segment_summary["last_t"] - segment_summary["first_t"]), 1),
+            "samples": n,
+            "mean_stress": round(segment_summary["sum"] / n, 2),
+            "max_stress": round(segment_summary["max"], 2),
+            "selfcheck_stai_s6_raw": selfcheck_score,
+            "selfcheck_stai_s": round(selfcheck_score * (20.0 / 6.0), 2) if selfcheck_score is not None else None,
+        }
+        append_consent_record(rec)
+        selfcheck_note = f"セルフチェック(STAI-S6)={selfcheck_score}" if selfcheck_score is not None else "セルフチェック未回答"
+        print(
+            f"記録 #{segment_no}: 平均ストレス {rec['mean_stress']:.1f} / 最大 {rec['max_stress']:.1f} "
+            f"（{n}サンプル, {rec['duration_sec']:.1f}秒）, {selfcheck_note}"
+        )
+        print(f"→ 記録しました: {CONSENT_RECORD_JSON_PATH} / {CONSENT_RECORD_CSV_PATH}")
+        segment_no += 1
 
     print("起動しました。まず数秒間、平常な表情を保ってください（較正中）。")
 
@@ -1502,6 +1645,13 @@ def main():
                         s["last_t"] = elapsed
                         for f in _FEATURES:
                             s["z_sum"][f] += z_comp[f]
+                    # スペースキー記録中の区間集計（同意書準拠モード）。ここでは平均/最大
+                    # ストレスという「推定結果」の集計値だけを更新し、生の特徴量は保持しない。
+                    if recording:
+                        segment_summary["samples"] += 1
+                        segment_summary["sum"] += smoothed_stress
+                        segment_summary["max"] = max(segment_summary["max"], smoothed_stress)
+                        segment_summary["last_t"] = elapsed
                     stress_history.append(
                         (
                             elapsed,
@@ -1519,6 +1669,11 @@ def main():
                     )
 
             # ================= 描画 =================
+            if recording:
+                cv2.putText(
+                    frame, "● 記録中 (スペースで停止)", (20, frame_h - 45),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2,
+                )
             if face_present and last_bbox is not None:
                 x, y, w, h = last_bbox
                 cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
@@ -1608,12 +1763,32 @@ def main():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
             )
 
-            cv2.imshow("Stress Evaluation (press q to quit)", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            cv2.imshow("Stress Evaluation (press SPACE to record, q to quit)", frame)
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
                 break
+            elif key == ord(" "):
+                if not recording:
+                    recording = True
+                    segment_summary = {"samples": 0, "sum": 0.0, "max": 0.0,
+                                        "first_t": elapsed, "last_t": elapsed}
+                    if selfcheck_server is not None:
+                        selfcheck_server.reset()
+                        webbrowser.open(f"http://127.0.0.1:{SELFCHECK_SERVER_PORT}/")
+                    print("\n記録を開始しました。（もう一度スペースキーで停止）")
+                else:
+                    recording = False
+                    print("記録を停止しました。")
+                    _finish_recording_segment()
     except KeyboardInterrupt:
         print("Ctrl+Cで中断されました。")
     finally:
+        if recording:
+            recording = False
+            print("記録中に終了したため、この区間までを保存します。")
+            _finish_recording_segment()
+        if selfcheck_server is not None:
+            selfcheck_server.stop()
         cap.release()
         cv2.destroyAllWindows()
         landmarker.close()  # mediapipe の終了時例外を避けるため明示的に閉じる
@@ -1655,12 +1830,13 @@ def main():
                 except Exception as e:
                     print(f"STAI 問診の実施に失敗しました: {e}")
 
-            try:
-                store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
-                           session_summaries=summaries, history_path=SESSION_HISTORY_PATH,
-                           stai_by_pid=stai_by_pid)
-            except Exception as e:
-                print(f"人物プロファイルの保存に失敗しました: {e}")
+            if FACE_PROFILE_PERSIST_ENABLED:
+                try:
+                    store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
+                               session_summaries=summaries, history_path=SESSION_HISTORY_PATH,
+                               stai_by_pid=stai_by_pid)
+                except Exception as e:
+                    print(f"人物プロファイルの保存に失敗しました: {e}")
 
 
 def _prompt_stai(label, min_val=20.0, max_val=80.0):

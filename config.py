@@ -135,16 +135,13 @@ REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _default_base_dir():
-    """OS ごとの標準的なユーザーデータ置き場を返す。"""
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(
-            os.path.expanduser("~"), "AppData", "Local"
-        )
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or os.path.join(
-            os.path.expanduser("~"), ".local", "share"
-        )
-    return os.path.join(base, "mirs-stress")
+    """データ保存先の既定値を返す。
+
+    AppData 等の隠しフォルダだと保存先が分かりにくいため、リポジトリの
+    ひとつ上の階層（例: MIRS2601_mental-detect/ の隣）に可視のディレクトリを
+    作ってそこに保存する。
+    """
+    return os.path.join(os.path.dirname(REPO_DIR), "mirs-stress-data")
 
 
 def _resolve_dir(env_name, default_path):
@@ -183,6 +180,16 @@ STAI_CSV_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.csv")
 PROFILES_JSON_PATH = os.path.join(OUTPUT_DIR, "person_profiles.json")
 SESSION_HISTORY_PATH = os.path.join(OUTPUT_DIR, "session_history.jsonl")
 SESSION_HISTORY_CSV_PATH = os.path.join(OUTPUT_DIR, "session_history.csv")
+
+# スペースキー記録（同意書準拠モード）の出力先。1回の「記録開始→停止」ごとに、
+# 匿名の集計結果（平均/最大ストレスとセルフチェックHTMLの自己申告スコア）のみを
+# 追記する。顔特徴量そのもの・人物IDは書き込まない（体験終了時に結びつきを残さないため）。
+CONSENT_RECORD_JSON_PATH = os.path.join(OUTPUT_DIR, "consent_session_records.jsonl")
+CONSENT_RECORD_CSV_PATH = os.path.join(OUTPUT_DIR, "consent_session_records.csv")
+# 記録中に開くセルフチェックHTML（簡易版STAI-S、6問）と、それを配信・結果を受け取る
+# ローカル専用(127.0.0.1)サーバのポート。
+SELFCHECK_HTML_PATH = os.path.join(REPO_DIR, "selfcheck", "stai_s6.html")
+SELFCHECK_SERVER_PORT = 8765
 # モデルは MODEL_DIR にキャッシュする。ここに残っている限り再ダウンロードされない。
 FACE_LANDMARKER_TASK = os.path.join(MODEL_DIR, "face_landmarker.task")
 FACE_LANDMARKER_URL = (
@@ -224,7 +231,16 @@ STAI_S_FORM = "full"
 # demo ブランチ専用: 未成年者が参加するデモ用に、終了時のデータ保存・STAI収集を
 # すべて無効化する（stress_config.json の mode 設定に関わらず優先）。
 # 通常運用のブランチではこの節ごと戻すか False にする。
-DEMO_NO_RECORD = True
+# ※ スペースキーで区切って記録する匿名の同意書準拠モード（CONSENT_RECORD_*）は
+#   このフラグと無関係に常時利用できる（記録するかどうかはスペースキー操作で
+#   参加者自身が都度選ぶため）。
+DEMO_NO_RECORD = False
+
+# 顔埋め込み・平常状態統計をセッションをまたいで永続化する「定点観測」機能
+# （person_profiles.json / session_history.*）を使うか。同意書は「体験終了と同時に
+# 顔特徴量データを削除し、誰のものか分からない結果のみ残す」ことを求めており、
+# セッションをまたいだ顔識別はこれと衝突するため既定は無効。
+FACE_PROFILE_PERSIST_ENABLED = False
 
 # --- STAI 質問紙（survey モード）---
 # STAI は 4 件法（各項目 1〜4）。20 項目合計で 20〜80 点になる。

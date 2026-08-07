@@ -26,6 +26,8 @@ stai_dataset.jsonl
 stress_log.csv
 stress_graph.png
 stress_config.json
+consent_session_records.jsonl
+consent_session_records.csv
 data/
 
 # ---- OS / エディタ ----

@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>STAI-S6（状態不安・短縮版）セルフチェック</title>
+<style>
+  body {
+    font-family: sans-serif;
+    margin: 0;
+    padding: 0;
+    background: #f1f5f9;
+    color: #0f172a;
+  }
+  .container {
+    max-width: 640px;
+    margin: 24px auto;
+    padding: 24px;
+    background: #ffffff;
+    border-radius: 14px;
+    box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+  }
+  h1 { margin-top: 0; font-size: 1.3rem; }
+  .description { margin-bottom: 20px; line-height: 1.7; }
+  .question { border-bottom: 1px solid #e2e8f0; padding: 16px 0; }
+  .question:last-of-type { border-bottom: none; }
+  .question-title { margin: 0 0 10px; font-weight: 600; }
+  .answers, .answers-header { display: grid; grid-template-columns: repeat(4, minmax(60px, 1fr)); gap: 8px; }
+  .answers-header { margin-bottom: 4px; }
+  .answers-header span { display: block; text-align: center; font-size: 0.72rem; color: #64748b; line-height: 1.3; }
+  label {
+    display: block;
+    background: #f8fafc;
+    border: 1px solid #cbd5e1;
+    border-radius: 10px;
+    padding: 10px 6px;
+    text-align: center;
+    font-size: 0.85rem;
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+  }
+  input[type="radio"] { display: none; }
+  input[type="radio"]:checked + span {
+    display: block;
+    background: #0284c7;
+    color: #fff;
+    border-radius: 8px;
+    padding: 4px 0;
+    margin: -4px 0;
+  }
+  button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    border: none;
+    border-radius: 999px;
+    padding: 14px 22px;
+    font-size: 1rem;
+    background: #2563eb;
+    color: white;
+    cursor: pointer;
+    margin-top: 16px;
+  }
+  button:disabled { background: #94a3b8; cursor: not-allowed; }
+  .result { margin-top: 20px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 12px; padding: 16px; }
+  .result.error { background: #fef2f2; border-color: #fecaca; color: #991b1b; }
+</style>
+</head>
+<body>
+  <div class="container">
+    <h1>気分アンケート（STAI-S 短縮版・6問）</h1>
+    <p class="description">
+      <strong>今この瞬間の気持ち</strong>に最も近いものを、各項目1つ選んでください。
+      すべて回答すると送信できます。
+    </p>
+    <form id="form">
+      <div id="answersHeader" class="answers-header"></div>
+      <div id="questions"></div>
+      <button type="button" id="submitBtn" onclick="submitScore()" disabled>結果を送信する</button>
+    </form>
+    <div id="result" class="result" style="display:none;"></div>
+  </div>
+
+<script>
+  // stai_items.json の state 項目 1,3,6,15,16,17（Marteau & Bekker 1992 のSTAI-6準拠）。
+  // reverse はこの6問内でのローカル位置（1-based）。
+  const ITEMS = [
+    { text: "平静である。", reverse: true },
+    { text: "固くなっている。", reverse: false },
+    { text: "どうてんしている。", reverse: false },
+    { text: "リラックスしている。", reverse: true },
+    { text: "満足している。", reverse: true },
+    { text: "心配である。", reverse: false },
+  ];
+  const ANCHORS = ["1: 全くそうでない", "2: いくぶんそうである", "3: ほぼそうである", "4: 全くそうである"];
+
+  document.getElementById("answersHeader").innerHTML = ANCHORS
+    .map((label) => `<span>${label.replace(/^\d+:\s*/, "")}</span>`)
+    .join("");
+
+  const questionsEl = document.getElementById("questions");
+  ITEMS.forEach((item, i) => {
+    const n = i + 1;
+    const div = document.createElement("div");
+    div.className = "question";
+    const answers = ANCHORS.map((label, vi) => {
+      const v = vi + 1;
+      return `<label><input type="radio" name="q${n}" value="${v}" onchange="updateState()"><span>${v}</span></label>`;
+    }).join("");
+    div.innerHTML = `<p class="question-title">${n}. ${item.text}</p><div class="answers">${answers}</div>`;
+    questionsEl.appendChild(div);
+  });
+
+  function currentScore() {
+    let total = 0;
+    for (let i = 0; i < ITEMS.length; i++) {
+      const n = i + 1;
+      const el = document.querySelector(`input[name='q${n}']:checked`);
+      if (!el) return null;
+      const val = Number(el.value);
+      total += ITEMS[i].reverse ? (5 - val) : val;
+    }
+    return total;
+  }
+
+  function updateState() {
+    document.getElementById("submitBtn").disabled = currentScore() === null;
+  }
+
+  async function submitScore() {
+    const score = currentScore();
+    if (score === null) return;
+    const resultEl = document.getElementById("result");
+    try {
+      const res = await fetch("/submit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ score: score }),
+      });
+      if (!res.ok) throw new Error(`送信に失敗しました（status ${res.status}）`);
+      resultEl.className = "result";
+      resultEl.innerHTML = `<strong>送信しました。</strong> スコア: ${score} / 24 点<br>このタブは自動的に閉じます。`;
+      setTimeout(() => window.close(), 1000);
+    } catch (e) {
+      resultEl.className = "result error";
+      resultEl.innerHTML = `<strong>送信できませんでした。</strong> ${e.message}<br>カメラアプリが起動しているか確認してから、もう一度お試しください。`;
+    }
+    resultEl.style.display = "block";
+  }
+</script>
+</body>
+</html>
