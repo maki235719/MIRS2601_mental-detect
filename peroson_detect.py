@@ -123,6 +123,7 @@ from config import (
     CORAL_MODEL_PATH,
     CORAL_DEVICE,
     RUN_MODE,
+    DEMO_NO_RECORD,
     STAI_S_FORM,
     STAI_SCALE_MIN,
     STAI_SCALE_MAX,
@@ -1616,44 +1617,50 @@ def main():
         cap.release()
         cv2.destroyAllWindows()
         landmarker.close()  # mediapipe の終了時例外を避けるため明示的に閉じる
-        save_stress_report(stress_history)
 
-        # 人物プロファイル（顔埋め込み・平常状態統計）を書き戻し、セッション履歴を追記する。
-        summaries = {
-            pid: {
-                "duration_sec": max(0.0, s["last_t"] - s["first_t"]),
-                "samples": s["samples"],
-                "mean_stress": s["sum"] / s["samples"] if s["samples"] else 0.0,
-                "max_stress": s["max"],
+        if DEMO_NO_RECORD:
+            # demo ブランチ: 未成年者が参加するため、ストレスログ/STAI収集/顔プロファイルの
+            # 保存を一切行わない（stress_config.json の mode 設定より優先）。
+            print("デモモード: データの収集・記録は行いません（何も保存されません）。")
+        else:
+            save_stress_report(stress_history)
+
+            # 人物プロファイル（顔埋め込み・平常状態統計）を書き戻し、セッション履歴を追記する。
+            summaries = {
+                pid: {
+                    "duration_sec": max(0.0, s["last_t"] - s["first_t"]),
+                    "samples": s["samples"],
+                    "mean_stress": s["sum"] / s["samples"] if s["samples"] else 0.0,
+                    "max_stress": s["max"],
+                }
+                for pid, s in session_summaries.items()
             }
-            for pid, s in session_summaries.items()
-        }
-        if id_tracker is not None:
-            store.next_id = id_tracker.next_id
+            if id_tracker is not None:
+                store.next_id = id_tracker.next_id
 
-        # 終了時のSTAIラベル付け。ここで貯めた (セッション平均z, STAI) のペアを
-        # tune_stress.py が学習に使う。モードにより採点済み得点の手入力(collect)か、
-        # アプリ内での質問紙実施＋自動採点(survey)かを切り替える。
-        # store.save() より先に実施し、得られた STAI-S/-T を session_history にも
-        # 同じ行で残せるようにする。
-        stai_by_pid = {}
-        if RUN_MODE == "collect":
-            try:
-                stai_by_pid = collect_stai_labels(session_summaries)
-            except Exception as e:
-                print(f"STAIラベルの記録に失敗しました: {e}")
-        elif RUN_MODE == "survey":
-            try:
-                stai_by_pid = run_stai_survey(session_summaries)
-            except Exception as e:
-                print(f"STAI 問診の実施に失敗しました: {e}")
+            # 終了時のSTAIラベル付け。ここで貯めた (セッション平均z, STAI) のペアを
+            # tune_stress.py が学習に使う。モードにより採点済み得点の手入力(collect)か、
+            # アプリ内での質問紙実施＋自動採点(survey)かを切り替える。
+            # store.save() より先に実施し、得られた STAI-S/-T を session_history にも
+            # 同じ行で残せるようにする。
+            stai_by_pid = {}
+            if RUN_MODE == "collect":
+                try:
+                    stai_by_pid = collect_stai_labels(session_summaries)
+                except Exception as e:
+                    print(f"STAIラベルの記録に失敗しました: {e}")
+            elif RUN_MODE == "survey":
+                try:
+                    stai_by_pid = run_stai_survey(session_summaries)
+                except Exception as e:
+                    print(f"STAI 問診の実施に失敗しました: {e}")
 
-        try:
-            store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
-                       session_summaries=summaries, history_path=SESSION_HISTORY_PATH,
-                       stai_by_pid=stai_by_pid)
-        except Exception as e:
-            print(f"人物プロファイルの保存に失敗しました: {e}")
+            try:
+                store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
+                           session_summaries=summaries, history_path=SESSION_HISTORY_PATH,
+                           stai_by_pid=stai_by_pid)
+            except Exception as e:
+                print(f"人物プロファイルの保存に失敗しました: {e}")
 
 
 def _prompt_stai(label, min_val=20.0, max_val=80.0):

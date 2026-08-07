@@ -221,6 +221,11 @@ RUN_MODE = "run"
 #   "short6" = 短縮版 STAI-S6(6-24) を入力し、20/6倍で 20-80 スケールに正規化
 STAI_S_FORM = "full"
 
+# demo ブランチ専用: 未成年者が参加するデモ用に、終了時のデータ保存・STAI収集を
+# すべて無効化する（stress_config.json の mode 設定に関わらず優先）。
+# 通常運用のブランチではこの節ごと戻すか False にする。
+DEMO_NO_RECORD = True
+
 # --- STAI 質問紙（survey モード）---
 # STAI は 4 件法（各項目 1〜4）。20 項目合計で 20〜80 点になる。
 STAI_SCALE_MIN = 1
