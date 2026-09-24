@@ -283,7 +283,7 @@ def create_face_landmarker():
 # 感情認識（Coral USB Accelerator / Edge TPU, 任意）
 # ============================================================================
 # HSEmotion(onnxruntime, CPU)の代わりにEdge TPUへオフロードする。事前に
-# coral/convert_emotion_model.py で変換した .tflite が必要（README参照）。
+# coral/convert_emotion_1l.py で変換した .tflite が必要（README参照）。
 # 未接続/未導入/変換モデル未配置なら try_create_coral_emotion_recognizer が
 # Noneを返し、呼び出し側でCPU(HSEmotionRecognizer)にフォールバックする。
 

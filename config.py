@@ -164,7 +164,13 @@ STRESS_CSV_PATH = os.path.join(OUTPUT_DIR, "stress_log.csv")
 STRESS_GRAPH_PATH = os.path.join(OUTPUT_DIR, "stress_graph.png")
 # チューニング可能なパラメータ（重み・ゲイン・基準・分散下限）の外部設定ファイル。
 # tune_stress.py が STAI 連動になるよう最適化して書き戻す先でもある。
-STRESS_CONFIG_PATH = os.path.join(OUTPUT_DIR, "stress_config.json")
+# リポジトリ直下に stress_config.json があればそれを優先する（無ければ従来どおり DATA_DIR 側）。
+# これにより、リポジトリを開いた場所で直接 mode 等を書き換えて即反映できる。
+_STRESS_CONFIG_IN_REPO = os.path.join(REPO_DIR, "stress_config.json")
+STRESS_CONFIG_PATH = (
+    _STRESS_CONFIG_IN_REPO if os.path.exists(_STRESS_CONFIG_IN_REPO)
+    else os.path.join(OUTPUT_DIR, "stress_config.json")
+)
 # STAI（状態不安STAI-S / 特性不安STAI-T）ラベルとセッション平均特徴の対応データセット。
 # collect モードで1セッション1レコード追記し、tune_stress.py がこれを読んでフィットする。
 STAI_DATASET_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.jsonl")
