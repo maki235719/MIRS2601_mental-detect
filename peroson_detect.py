@@ -63,163 +63,71 @@ import matplotlib.pyplot as plt
 
 
 # ============================================================================
-# 設定
+# 設定（定数は config.py に集約。tune_stress.py が書き戻す可変値は stress_config.json）
 # ============================================================================
 
-# HSEmotion が返す感情ラベル（8クラス） → 日本語表示（描画はフォント都合で英語）
-EMOTION_JP = {
-    "Anger":     "怒り",
-    "Contempt":  "軽蔑",
-    "Disgust":   "嫌悪",
-    "Fear":      "恐怖",
-    "Happiness": "喜び",
-    "Neutral":   "無表情",
-    "Sadness":   "悲しみ",
-    "Surprise":  "驚き",
-}
-
-# ストレス方向に働くネガティブ感情（この確率和が高いほどストレス寄り）
-NEGATIVE_EMOTIONS = ["Anger", "Contempt", "Disgust", "Fear", "Sadness"]
-
-# 何フレームごとに感情解析(HSEmotion)を実行するか。
-# 顔ランドマーク(FaceLandmarker)は毎フレーム実行する（まばたき検出に必要かつ軽量）。
-ANALYZE_EVERY = 3
-
-# 使用する感情モデル（enet_b2_8 = 8クラス, 入力260px, b0より高精度）
-HSEMOTION_MODEL = "enet_b2_8"
-
-# 感情確率ベクトルの時間平滑化係数（0-1, 大きいほど反応が速い）
-EMO_EMA_ALPHA = 0.4
-# 最終ストレススコアの表示平滑化係数
-STRESS_EMA_ALPHA = 0.3
-
-# --- ストレススコア合成の設定 ---
-# 各成分をベースラインからのzスコアにし、重み付き和を取る（合計が1.0になるよう配分）
-# 論文（Giannakakis 2017 / 顔AUストレス解析2021 ほか）で報告された相関の強い
-# 顔特徴を追加: head=頭部の動き, mouth=口唇の緊張, eye=瞼の緊張。重みは実測に応じ調整可。
-STRESS_COMPONENT_WEIGHTS = {
-    "emotion": 0.40,  # ネガティブ感情の増加
-    "brow":    0.20,  # 眉間のしわ（browDown / AU4）の増加
-    "blink":   0.10,  # まばたき率の増加
-    "head":    0.12,  # 頭部運動（角速度）の増加
-    "mouth":   0.10,  # 口唇の緊張（mouthPress / AU23-24）の増加
-    "eye":     0.08,  # 瞼の緊張（eyeSquint / AU7）の増加
-}
-# z=0（＝平常時）を何点にするか、および z 1あたり何点上げるか
-STRESS_BASE_LEVEL = 25.0
-STRESS_Z_GAIN = 15.0
-
-# zスコアの分母（標準偏差）の下限。平常状態が静かすぎるとノイズで暴れるのを防ぐ
-EMO_STD_FLOOR = 0.05
-BROW_STD_FLOOR = 0.02
-BLINK_STD_FLOOR = 3.0    # 回/分
-HEAD_STD_FLOOR = 2.0     # deg/秒（平滑化角速度）
-MOUTH_STD_FLOOR = 0.02
-EYE_STD_FLOOR = 0.02
-
-# 頭部運動（角速度）の時間平滑化係数（0-1, 大きいほど反応が速い）
-HEAD_EMA_ALPHA = 0.4
-
-# --- 移動（並進）と頭単体の動きの分離 ---
-# 歩行など「全身の移動」は頭部姿勢行列の並進成分(位置)に強く出る。一方、頭を振る等の
-# 「頭単体の動き」は回転成分(向き)に出て並進は小さい。並進速度が大きいフレームは
-# 「移動中」とみなし、頭部運動(回転)のストレス寄与をゲート(抑制)して、移動を頭の動き＝
-# ストレスと誤評価しないようにする。単位は行列の並進(MediaPipe: おおよそcm)/秒。
-# 実際の値は画面HUDの loco: 表示で確認できるので、着席時/歩行時を見て閾値を調整する。
-LOCO_EMA_ALPHA = 0.4         # 並進速度の時間平滑化係数（0-1, 大きいほど反応が速い）
-LOCO_GATE_LOW = 8.0          # これ以下は「静止」→頭部運動をフル採用（gate=1.0）
-LOCO_GATE_HIGH = 25.0        # これ以上は「移動中」→頭部運動を無効化（gate=0.0）
-
-# 較正（ベースライン測定）フェーズの長さ（秒）
-CALIB_SECONDS = 7.0
-
-# まばたき検出（blendshape eyeBlink のしきい値・ヒステリシス）と集計窓
-BLINK_ON_THRESHOLD = 0.5
-BLINK_OFF_THRESHOLD = 0.35
-BLINK_WINDOW_SEC = 30.0  # まばたき率を計算する直近の窓（秒）
-
-# 顔クロップの余白（ランドマーク外接矩形に対する比率）
-FACE_CROP_MARGIN = 0.15
-
-# ストレスバーの色分けしきい値（0-100）
-STRESS_LOW_THRESHOLD = 33   # これ未満は緑（低ストレス）
-STRESS_HIGH_THRESHOLD = 66  # これ以上は赤（高ストレス）、間は黄
-
-# --- 顔識別（同一人物判定・タグ付け）の設定 ---
-# 顔の埋め込みベクトル(embedding)を計算し、コサイン類似度で「同じ顔か」を判定する。
-# フレームごとの識別に連続性を持たせるため、別人と判定し続けて初めてタグを切り替える
-# （ヒステリシス）。insightface が無い場合は自動的に無効化され、本体は従来どおり動く。
-FACE_ID_ENABLED = True          # 顔識別機能を使うか
-# 使用バックエンド: "auto"|"deepface"|"insightface"|"landmark"
-# auto の解決順は deepface → insightface → landmark。
-# ※ landmark（幾何）方式は別人でも類似度が0.99に張り付き分離できないため最終手段。
-#   深層埋め込み(deepface/insightface)が別人分離には桁違いに強い。
-FACE_ID_BACKEND = "auto"
-FACE_ID_EVERY = ANALYZE_EVERY   # 何フレームごとに顔認識を実行するか（重い場合は5〜10に上げる）
-FACE_ID_ALIGN = True            # 認識前にクロップを目の傾きで水平化する（精度向上）
-FACE_ID_SWITCH_PATIENCE = 8     # 別人と判定し続けてからタグを切り替えるフレーム数（連続性）
-FACE_ID_EMBED_EMA = 0.1         # 登録済み埋め込みを毎回どれだけ更新するか（0-1）
-
-# --- deepface（既定・推奨）---
-FACE_ID_MODEL_DEEPFACE = "SFace"   # 軽量・高速でCPUリアルタイム向き
-FACE_ID_SIM_THRESHOLD_DEEPFACE = 0.40  # 類似度がこれ以上なら同一人物（画面のsimを見て調整）
-
-# --- insightface（任意・高精度。Python3.13のWindowsでは導入が不安定）---
-FACE_ID_MODEL = "buffalo_l"     # 認識モデル: buffalo_s=軽量, buffalo_l=高精度
-FACE_ID_SIM_THRESHOLD = 0.35    # 類似度がこれ以上なら同一人物（0-1）
-FACE_ID_DET_SIZE = 320          # insightface 内部検出器の入力サイズ（小さいほど高速）
-
-# --- landmark（最終手段。幾何形状ベクトル。別人分離は弱い）---
-FACE_ID_SIM_THRESHOLD_LMK = 0.99  # 類似度がこれ以上なら同一人物（0-1）
-
-# 出力ファイル/モデルファイル（スクリプトと同じフォルダ）
-OUTPUT_DIR = os.path.dirname(os.path.abspath(__file__))
-STRESS_CSV_PATH = os.path.join(OUTPUT_DIR, "stress_log.csv")
-STRESS_GRAPH_PATH = os.path.join(OUTPUT_DIR, "stress_graph.png")
-# チューニング可能なパラメータ（重み・ゲイン・基準・分散下限）の外部設定ファイル。
-# tune_stress.py が STAI 連動になるよう最適化して書き戻す先でもある。
-STRESS_CONFIG_PATH = os.path.join(OUTPUT_DIR, "stress_config.json")
-# STAI（状態不安STAI-S / 特性不安STAI-T）ラベルとセッション平均特徴の対応データセット。
-# collect モードで1セッション1レコード追記し、tune_stress.py がこれを読んでフィットする。
-STAI_DATASET_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.jsonl")
-# STAI 質問紙の項目文・逆転項目・選択肢アンカーを外部化した編集可能ファイル。
-# survey モードで終了時にこの質問紙を提示し、逆転採点して STAI-S/-T を算出する。
-# 無ければ雛形（プレースホルダ項目文）を自動生成するので、正式な日本語項目文に差し替える。
-STAI_ITEMS_PATH = os.path.join(OUTPUT_DIR, "stai_items.json")
-# 定点観測用の永続データ（人物ごとの顔埋め込み・平常状態統計）とセッション履歴
-PROFILES_JSON_PATH = os.path.join(OUTPUT_DIR, "person_profiles.json")
-SESSION_HISTORY_PATH = os.path.join(OUTPUT_DIR, "session_history.jsonl")
-FACE_LANDMARKER_TASK = os.path.join(OUTPUT_DIR, "face_landmarker.task")
-FACE_LANDMARKER_URL = (
-    "https://storage.googleapis.com/mediapipe-models/face_landmarker/"
-    "face_landmarker/float16/1/face_landmarker.task"
+from config import (
+    NEGATIVE_EMOTIONS,
+    ANALYZE_EVERY,
+    HSEMOTION_MODEL,
+    EMO_EMA_ALPHA,
+    STRESS_EMA_ALPHA,
+    STRESS_COMPONENT_WEIGHTS,
+    STRESS_BASE_LEVEL,
+    STRESS_Z_GAIN,
+    EMO_STD_FLOOR,
+    BROW_STD_FLOOR,
+    BLINK_STD_FLOOR,
+    HEAD_STD_FLOOR,
+    MOUTH_STD_FLOOR,
+    EYE_STD_FLOOR,
+    HEAD_EMA_ALPHA,
+    LOCO_EMA_ALPHA,
+    LOCO_GATE_LOW,
+    LOCO_GATE_HIGH,
+    CALIB_SECONDS,
+    BLINK_ON_THRESHOLD,
+    BLINK_OFF_THRESHOLD,
+    BLINK_WINDOW_SEC,
+    FACE_CROP_MARGIN,
+    STRESS_LOW_THRESHOLD,
+    STRESS_HIGH_THRESHOLD,
+    FACE_ID_ENABLED,
+    FACE_ID_BACKEND,
+    FACE_ID_EVERY,
+    FACE_ID_ALIGN,
+    FACE_ID_SWITCH_PATIENCE,
+    FACE_ID_EMBED_EMA,
+    FACE_ID_MODEL_DEEPFACE,
+    FACE_ID_SIM_THRESHOLD_DEEPFACE,
+    FACE_ID_MODEL,
+    FACE_ID_SIM_THRESHOLD,
+    FACE_ID_DET_SIZE,
+    FACE_ID_SIM_THRESHOLD_LMK,
+    OUTPUT_DIR,
+    STRESS_CSV_PATH,
+    STRESS_GRAPH_PATH,
+    STRESS_CONFIG_PATH,
+    STAI_DATASET_PATH,
+    STAI_CSV_PATH,
+    STAI_ITEMS_PATH,
+    PROFILES_JSON_PATH,
+    SESSION_HISTORY_PATH,
+    SESSION_HISTORY_CSV_PATH,
+    FACE_LANDMARKER_TASK,
+    FACE_LANDMARKER_URL,
+    DEEPFACE_WEIGHTS_DIR,
+    SFACE_WEIGHT_PATH,
+    SFACE_WEIGHT_URL,
+    CORAL_ENABLED,
+    CORAL_MODEL_PATH,
+    CORAL_DEVICE,
+    RUN_MODE,
+    STAI_S_FORM,
+    STAI_SCALE_MIN,
+    STAI_SCALE_MAX,
+    STAI_ITEMS_PER_SCALE,
 )
-
-# DeepFace(SFace) の重みファイル。DeepFace 内蔵のダウンローダは不安定なので、
-# 確実な urllib で事前にキャッシュへ配置する（無ければ）。
-DEEPFACE_WEIGHTS_DIR = os.path.join(os.path.expanduser("~"), ".deepface", "weights")
-SFACE_WEIGHT_NAME = "face_recognition_sface_2021dec.onnx"
-SFACE_WEIGHT_PATH = os.path.join(DEEPFACE_WEIGHTS_DIR, SFACE_WEIGHT_NAME)
-SFACE_WEIGHT_URL = (
-    "https://github.com/opencv/opencv_zoo/raw/main/"
-    "models/face_recognition_sface/face_recognition_sface_2021dec.onnx"
-)
-
-
-# --- Coral USB Accelerator (Edge TPU) 対応（任意）---
-# HSEmotion の感情分類を Edge TPU にオフロードする。無効時/未接続時は自動でCPU(onnxruntime)へ
-# フォールバックするため、この機能は無くても本体は従来どおり動く。
-CORAL_ENABLED = False
-CORAL_MODEL_PATH = os.path.join(OUTPUT_DIR, "coral", "models", "emotion_enet_b2_8_edgetpu.tflite")
-CORAL_DEVICE = ""  # 複数Coral接続時の識別子（例 ":0"）。空なら既定デバイス。
-
-# 実行モード（stress_config.json の "mode" で切り替える。既定は run＝従来どおり何も聞かない）:
-#   "run"     = 調整済みで実運用。終了時に何も聞かない。
-#   "collect" = 終了時に別途採点済みの STAI 得点(20-80)を手入力してデータセットへ蓄積。
-#   "survey"  = 終了時にアプリ内で STAI 質問紙(20項目)に回答→逆転項目を含め自動採点→
-#               算出した STAI-S/-T をデータセットへ保存（別紙での実施・手入力が不要）。
-RUN_MODE = "run"
-
 
 # ============================================================================
 # 設定ファイル（チューニング可能パラメータの外部化）
@@ -229,6 +137,7 @@ def _default_stress_config():
     """現行のハードコード値から config 雛形（辞書）を組み立てる。"""
     return {
         "mode": RUN_MODE,
+        "stai_s_form": STAI_S_FORM,
         "weights": dict(STRESS_COMPONENT_WEIGHTS),
         "base_level": STRESS_BASE_LEVEL,
         "z_gain": STRESS_Z_GAIN,
@@ -252,7 +161,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
     """stress_config.json を読み、ストレス合成のパラメータ（重み・ゲイン・基準・分散下限）と
     実行モードをモジュール全体へ反映する。ファイルが無ければ現行値で雛形を書き出して従来どおり動く。
     tune_stress.py が書き戻したチューニング結果を、ここで一元的に取り込む。"""
-    global STRESS_BASE_LEVEL, STRESS_Z_GAIN, RUN_MODE
+    global STRESS_BASE_LEVEL, STRESS_Z_GAIN, RUN_MODE, STAI_S_FORM
     global EMO_STD_FLOOR, BROW_STD_FLOOR, BLINK_STD_FLOOR
     global HEAD_STD_FLOOR, MOUTH_STD_FLOOR, EYE_STD_FLOOR
     global CORAL_ENABLED, CORAL_MODEL_PATH, CORAL_DEVICE
@@ -274,6 +183,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
         return
 
     RUN_MODE = str(cfg.get("mode", RUN_MODE)).lower()
+    STAI_S_FORM = str(cfg.get("stai_s_form", STAI_S_FORM)).lower()
 
     # 重み（キーは既存のものだけ採用し、欠けは現行値を維持）
     for k, v in (cfg.get("weights") or {}).items():
@@ -311,7 +221,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
     # 分散下限を参照するテーブル（後段で定義済み）も同期しておく。
     _sync_feature_std_floors()
     print(
-        f"設定を読み込みました（mode={RUN_MODE}）: "
+        f"設定を読み込みました（mode={RUN_MODE}, stai_s_form={STAI_S_FORM}）: "
         f"weights={STRESS_COMPONENT_WEIGHTS}, base={STRESS_BASE_LEVEL}, gain={STRESS_Z_GAIN}, "
         f"coral={'ON' if CORAL_ENABLED else 'OFF'}"
     )
@@ -373,7 +283,7 @@ def create_face_landmarker():
 # 感情認識（Coral USB Accelerator / Edge TPU, 任意）
 # ============================================================================
 # HSEmotion(onnxruntime, CPU)の代わりにEdge TPUへオフロードする。事前に
-# coral/convert_emotion_model.py で変換した .tflite が必要（README参照）。
+# coral/convert_emotion_1l.py で変換した .tflite が必要（README参照）。
 # 未接続/未導入/変換モデル未配置なら try_create_coral_emotion_recognizer が
 # Noneを返し、呼び出し側でCPU(HSEmotionRecognizer)にフォールバックする。
 
@@ -1130,8 +1040,11 @@ class PersonStore:
             welford_update(bl["blink"], float(blink_rate))  # 平常瞬目率（1セッション1サンプル）
         return self.baseline_dict(pid)
 
-    def save(self, path, gallery, session_summaries, history_path):
-        """最新の埋め込み・session_count を書き戻し、セッション履歴(JSONL)を追記する。"""
+    def save(self, path, gallery, session_summaries, history_path, stai_by_pid=None):
+        """最新の埋め込み・session_count を書き戻し、セッション履歴(JSONL/CSV)を追記する。
+        stai_by_pid が渡されれば（collect/surveyモードで人物ごとに回答済みなら）、
+        そのセッションで得た STAI-S/-T を履歴の同じ行に一緒に記録する。"""
+        stai_by_pid = stai_by_pid or {}
         now = datetime.now().isoformat(timespec="seconds")
         for pid, emb in (gallery or {}).items():
             pid = int(pid)
@@ -1164,6 +1077,7 @@ class PersonStore:
             with open(history_path, "a", encoding="utf-8") as f:
                 for pid, s in session_summaries.items():
                     p = self.persons.get(int(pid), {})
+                    stai = stai_by_pid.get(int(pid), {})
                     rec = {
                         "date": now,
                         "person_id": int(pid),
@@ -1172,14 +1086,51 @@ class PersonStore:
                         "mean_stress": round(s["mean_stress"], 1),
                         "max_stress": round(s["max_stress"], 1),
                         "baseline_sessions": int(p.get("session_count", 0)),
+                        "stai_state": stai.get("stai_state"),
+                        "stai_trait": stai.get("stai_trait"),
                     }
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-            print(f"セッション履歴を追記しました: {history_path}")
+                    header = ["date", "person_id", "duration_sec", "samples", "mean_stress",
+                               "max_stress", "baseline_sessions", "stai_state", "stai_trait"]
+                    _append_csv_row(
+                        SESSION_HISTORY_CSV_PATH,
+                        header,
+                        [rec[h] for h in header],
+                    )
+            print(f"セッション履歴を追記しました: {history_path} / {SESSION_HISTORY_CSV_PATH}")
 
 
 # ============================================================================
 # レポート保存
 # ============================================================================
+
+def _append_csv_row(path, header, row):
+    """CSVファイルに1行追記する。無ければヘッダー行を先に書く（Excel向けにBOM付き）。
+    既存ファイルの列がヘッダーと食い違う場合（列を追加した等）は、既存行を新ヘッダーに
+    合わせて移行してから追記する（列名で対応付け、無い列は空欄）。"""
+    if os.path.exists(path):
+        with open(path, "r", newline="", encoding="utf-8-sig") as f:
+            existing = list(csv.reader(f))
+        if existing and existing[0] != header:
+            old_header, old_rows = existing[0], existing[1:]
+            idx = {name: i for i, name in enumerate(old_header)}
+            migrated = [
+                [r[idx[h]] if h in idx and idx[h] < len(r) else "" for h in header]
+                for r in old_rows
+            ]
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                writer = csv.writer(f)
+                writer.writerow(header)
+                writer.writerows(migrated)
+                writer.writerow(row)
+            return
+    write_header = not os.path.exists(path)
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(header)
+        writer.writerow(row)
+
 
 def save_stress_report(stress_history):
     """セッション終了時にストレススコアの時系列をCSVとグラフ画像に保存する"""
@@ -1679,29 +1630,34 @@ def main():
         }
         if id_tracker is not None:
             store.next_id = id_tracker.next_id
-        try:
-            store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
-                       session_summaries=summaries, history_path=SESSION_HISTORY_PATH)
-        except Exception as e:
-            print(f"人物プロファイルの保存に失敗しました: {e}")
 
         # 終了時のSTAIラベル付け。ここで貯めた (セッション平均z, STAI) のペアを
         # tune_stress.py が学習に使う。モードにより採点済み得点の手入力(collect)か、
         # アプリ内での質問紙実施＋自動採点(survey)かを切り替える。
+        # store.save() より先に実施し、得られた STAI-S/-T を session_history にも
+        # 同じ行で残せるようにする。
+        stai_by_pid = {}
         if RUN_MODE == "collect":
             try:
-                collect_stai_labels(session_summaries)
+                stai_by_pid = collect_stai_labels(session_summaries)
             except Exception as e:
                 print(f"STAIラベルの記録に失敗しました: {e}")
         elif RUN_MODE == "survey":
             try:
-                run_stai_survey(session_summaries)
+                stai_by_pid = run_stai_survey(session_summaries)
             except Exception as e:
                 print(f"STAI 問診の実施に失敗しました: {e}")
 
+        try:
+            store.save(PROFILES_JSON_PATH, gallery=(id_tracker.gallery if id_tracker else {}),
+                       session_summaries=summaries, history_path=SESSION_HISTORY_PATH,
+                       stai_by_pid=stai_by_pid)
+        except Exception as e:
+            print(f"人物プロファイルの保存に失敗しました: {e}")
 
-def _prompt_stai(label):
-    """STAI 得点(20-80)をコンソールから読む。空欄/範囲外/非数値は None を返す。"""
+
+def _prompt_stai(label, min_val=20.0, max_val=80.0):
+    """STAI 得点などをコンソールから読む。空欄/範囲外/非数値は None を返す。"""
     try:
         raw = input(label).strip()
     except EOFError:
@@ -1713,18 +1669,32 @@ def _prompt_stai(label):
     except ValueError:
         print("  数値ではないためスキップしました。")
         return None
-    if not (20.0 <= val <= 80.0):
-        print("  STAI は 20〜80 の範囲です。範囲外のためスキップしました。")
+    if not (min_val <= val <= max_val):
+        print(f"  入力値は {min_val}〜{max_val} の範囲である必要があります。範囲外のためスキップしました。")
         return None
     return val
 
 
+def append_stai_record(rec):
+    """rec を stai_dataset.jsonl（tune_stress.py用）と stai_dataset.csv（閲覧用）の両方に追記する。"""
+    with open(STAI_DATASET_PATH, "a", encoding="utf-8") as f:
+        f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    header = ["date", "person_id", "stai_state", "stai_trait",
+              "duration_sec", "samples", "mean_stress"] + [f"z_{k}" for k in _FEATURES]
+    row = [rec["date"], rec["person_id"], rec["stai_state"], rec["stai_trait"],
+           rec["duration_sec"], rec["samples"], rec["mean_stress"]] + [rec["z"][k] for k in _FEATURES]
+    _append_csv_row(STAI_CSV_PATH, header, row)
+
+
 def collect_stai_labels(session_summaries):
     """セッション終了時に人物ごとの STAI-S/-T を入力させ、セッション平均zと一緒に
-    stai_dataset.jsonl へ1レコードずつ追記する（STAI-S が入力された人物のみ保存）。"""
+    stai_dataset.jsonl へ1レコードずつ追記する（STAI-S が入力された人物のみ保存）。
+    戻り値 {pid: {"stai_state":..,"stai_trait":..}} は session_history にも
+    同じ得点を残すため、呼び出し側(main)が store.save() に渡す。"""
+    results = {}
     if not session_summaries:
         print("このセッションでは評価サンプルが無いため、STAIの記録は行いません。")
-        return
+        return results
     print("\n=== STAI ラベル入力（collect モード）===")
     print("各人物について STAI 得点を入力してください（空欄でその人物をスキップ）。")
     saved = 0
@@ -1734,10 +1704,17 @@ def collect_stai_labels(session_summaries):
         if n <= 0:
             continue
         print(f"\n[人物 ID={pid}] このセッションの平均ストレス {s['sum'] / n:.1f} / 100")
-        stai_s = _prompt_stai("  STAI-S 状態不安 (20-80, 空欄=この人物をスキップ): ")
-        if stai_s is None:
-            print("  → スキップしました。")
-            continue
+        if STAI_S_FORM == "short6":
+            stai_s6 = _prompt_stai("  STAI-S6 状態不安 (短縮版 6-24, 空欄=この人物をスキップ): ", 6.0, 24.0)
+            if stai_s6 is None:
+                print("  → スキップしました。")
+                continue
+            stai_s = stai_s6 * (20.0 / 6.0)  # 20〜80のスケールに正規化
+        else:
+            stai_s = _prompt_stai("  STAI-S 状態不安 (20-80, 空欄=この人物をスキップ): ")
+            if stai_s is None:
+                print("  → スキップしました。")
+                continue
         stai_t = _prompt_stai("  STAI-T 特性不安 (20-80, 空欄=可): ")
         rec = {
             "date": now,
@@ -1749,14 +1726,15 @@ def collect_stai_labels(session_summaries):
             "mean_stress": round(s["sum"] / n, 2),
             "z": {f: round(s["z_sum"][f] / n, 4) for f in _FEATURES},
         }
-        with open(STAI_DATASET_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        append_stai_record(rec)
+        results[int(pid)] = {"stai_state": stai_s, "stai_trait": stai_t}
         saved += 1
     if saved:
-        print(f"\nSTAI ラベルを {saved} 件記録しました: {STAI_DATASET_PATH}")
+        print(f"\nSTAI ラベルを {saved} 件記録しました: {STAI_DATASET_PATH} / {STAI_CSV_PATH}")
         print("十分たまったら `python tune_stress.py --report` で相関を確認できます。")
     else:
         print("\nSTAI ラベルは記録されませんでした。")
+    return results
 
 
 # ============================================================================
@@ -1765,11 +1743,7 @@ def collect_stai_labels(session_summaries):
 # collect モードが「別紙で実施・採点済みの得点」を手入力させるのに対し、survey モードは
 # 終了時にアプリ内で 20 項目に回答させ、逆転項目を含めて自動採点して STAI-S/-T を算出する。
 # 項目文・逆転項目・選択肢アンカーは stai_items.json（編集可能）に外部化する。
-
-# STAI は 4 件法（各項目 1〜4）。20 項目合計で 20〜80 点になる。
-STAI_SCALE_MIN = 1
-STAI_SCALE_MAX = 4
-STAI_ITEMS_PER_SCALE = 20
+# （STAI_SCALE_MIN/MAX, STAI_ITEMS_PER_SCALE は config.py で定義）
 
 
 def _default_stai_items():
@@ -1914,10 +1888,13 @@ def _prompt_scale_choice():
 
 def run_stai_survey(session_summaries):
     """survey モードの本体。終了時にアプリ内で STAI 質問紙を実施し、逆転採点して算出した
-    STAI-S/-T を、collect と同一 schema で stai_dataset.jsonl へ人物ごとに追記する。"""
+    STAI-S/-T を、collect と同一 schema で stai_dataset.jsonl へ人物ごとに追記する。
+    戻り値 {pid: {"stai_state":..,"stai_trait":..}} は session_history にも
+    同じ得点を残すため、呼び出し側(main)が store.save() に渡す。"""
+    results = {}
     if not session_summaries:
         print("このセッションでは評価サンプルが無いため、STAIの記録は行いません。")
-        return
+        return results
 
     items = load_stai_items()
     scale = _prompt_scale_choice()
@@ -1946,14 +1923,15 @@ def run_stai_survey(session_summaries):
             "mean_stress": round(s["sum"] / n, 2),
             "z": {f: round(s["z_sum"][f] / n, 4) for f in _FEATURES},
         }
-        with open(STAI_DATASET_PATH, "a", encoding="utf-8") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+        append_stai_record(rec)
+        results[int(pid)] = {"stai_state": float(stai_s), "stai_trait": rec["stai_trait"]}
         saved += 1
     if saved:
-        print(f"\nSTAI 得点を自動採点して {saved} 件記録しました: {STAI_DATASET_PATH}")
+        print(f"\nSTAI 得点を自動採点して {saved} 件記録しました: {STAI_DATASET_PATH} / {STAI_CSV_PATH}")
         print("十分たまったら `python tune_stress.py --report` で相関を確認できます。")
     else:
         print("\nSTAI 得点は記録されませんでした。")
+    return results
 
 
 if __name__ == "__main__":
