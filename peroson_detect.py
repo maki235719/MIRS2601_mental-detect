@@ -44,22 +44,13 @@ from mediapipe.tasks.python import vision
 from hsemotion_onnx.facial_emotions import HSEmotionRecognizer
 
 # 顔識別（同一人物判定）用。未インストールでも本体は従来どおり動くよう optional にする。
-try:
-    from insightface.app import FaceAnalysis
-    _HAS_INSIGHTFACE = True
-except Exception:
-    _HAS_INSIGHTFACE = False
+import importlib.util
 
+# 重いライブラリは実際に使うバックエンドの分岐でだけ import する（起動時間・常駐メモリ削減）。
+# ここでは導入有無のみ find_spec で判定する。
+_HAS_INSIGHTFACE = importlib.util.find_spec("insightface") is not None
 # DeepFace（深層顔認識・既定バックエンド）。幾何ランドマークより別人分離が桁違いに強い。
-try:
-    from deepface import DeepFace
-    _HAS_DEEPFACE = True
-except Exception:
-    _HAS_DEEPFACE = False
-
-import matplotlib
-matplotlib.use("Agg")  # imshowウィンドウと競合しない保存専用バックエンド
-import matplotlib.pyplot as plt
+_HAS_DEEPFACE = importlib.util.find_spec("deepface") is not None
 
 
 # ============================================================================
@@ -683,6 +674,7 @@ def create_face_recognizer():
     if not (FACE_ID_ENABLED and _HAS_INSIGHTFACE):
         return None
     try:
+        from insightface.app import FaceAnalysis
         app = FaceAnalysis(
             name=FACE_ID_MODEL,
             allowed_modules=["detection", "recognition"],
@@ -788,6 +780,7 @@ def deepface_face_embedding(face_bgr):
     detector_backend='skip' で検出を省き、こちらが渡したクロップをそのまま使う。"""
     if face_bgr is None or face_bgr.size == 0:
         return None
+    from deepface import DeepFace
     reps = DeepFace.represent(
         face_bgr,
         model_name=FACE_ID_MODEL_DEEPFACE,
@@ -1239,6 +1232,10 @@ def save_stress_report(stress_history):
     times = [row[0] for row in stress_history]
     scores = [row[3] for row in stress_history]  # row[3]=stress_score（row[2]はface_id）
 
+    import matplotlib
+    matplotlib.use("Agg")  # imshowウィンドウと競合しない保存専用バックエンド
+    import matplotlib.pyplot as plt
+
     plt.figure(figsize=(10, 4))
     plt.plot(times, scores, color="tab:red", linewidth=1.5)
     plt.xlabel("Elapsed Time (sec)")
@@ -1282,6 +1279,7 @@ def main(on_sample=None, should_stop=None, show_video=True):
         try:
             if FACE_ID_MODEL_DEEPFACE == "SFace":
                 ensure_sface_model()          # 内蔵DLが不安定なので urllib で確実に配置
+            from deepface import DeepFace
             DeepFace.build_model(FACE_ID_MODEL_DEEPFACE)  # 初回DL・初回推論の遅延を起動時に寄せる
             id_tracker = FaceIdentityTracker(sim_threshold=FACE_ID_SIM_THRESHOLD_DEEPFACE)
             print("顔識別が有効です（SFace / DeepFace）。同じ顔には同じIDタグが付きます。")
@@ -1577,111 +1575,113 @@ def main(on_sample=None, should_stop=None, show_video=True):
                     on_sample(now, active_pid, smoothed_stress)
 
             # ================= 描画 =================
-            if face_present and last_bbox is not None:
-                x, y, w, h = last_bbox
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-                if smoothed_probs:
-                    dom = max(smoothed_probs, key=smoothed_probs.get)
-                    conf = smoothed_probs[dom] * 100.0
-                    label = f"{dom} {conf:.0f}%"
-                else:
-                    label = "..."
-                cv2.rectangle(frame, (x, y - 25), (x + max(w, 200), y), (0, 255, 0), -1)
-                cv2.putText(
-                    frame, label, (x + 3, y - 7),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2,
-                )
-                # 人物タグ（連続性のある識別ID）を顔枠の下に表示
-                if last_face_id is not None:
-                    id_label = f"ID:{last_face_id}  sim:{last_face_sim:.2f}"
-                    cv2.rectangle(
-                        frame, (x, y + h), (x + max(w, 170), y + h + 24), (0, 200, 0), -1
-                    )
+            # ROS2(headless)では画面に出さないので描画自体を省く
+            if show_video:
+                if face_present and last_bbox is not None:
+                    x, y, w, h = last_bbox
+                    cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                    if smoothed_probs:
+                        dom = max(smoothed_probs, key=smoothed_probs.get)
+                        conf = smoothed_probs[dom] * 100.0
+                        label = f"{dom} {conf:.0f}%"
+                    else:
+                        label = "..."
+                    cv2.rectangle(frame, (x, y - 25), (x + max(w, 200), y), (0, 255, 0), -1)
                     cv2.putText(
-                        frame, id_label, (x + 3, y + h + 17),
+                        frame, label, (x + 3, y - 7),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2,
                     )
+                    # 人物タグ（連続性のある識別ID）を顔枠の下に表示
+                    if last_face_id is not None:
+                        id_label = f"ID:{last_face_id}  sim:{last_face_sim:.2f}"
+                        cv2.rectangle(
+                            frame, (x, y + h), (x + max(w, 170), y + h + 24), (0, 200, 0), -1
+                        )
+                        cv2.putText(
+                            frame, id_label, (x + 3, y + h + 17),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2,
+                        )
 
-            # 較正/学習の進捗 or ストレスゲージ
-            if calibrating:
-                buf = calib_buf.get(active_pid)
-                remaining = (
-                    max(0.0, CALIB_SECONDS - (elapsed - buf["t0"])) if buf else CALIB_SECONDS
-                )
-                cv2.putText(
-                    frame,
-                    f"CALIBRATING... keep a neutral face ({remaining:.0f}s)",
-                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
-                )
-            elif active_baseline is None:
-                # passiveモード: そのIDの"普段"サンプルがまだ足りない。ポーズは指示せず
-                # 状況だけ表示する（明示的な較正指示が基準を歪める、という指摘への対応）。
-                count = 0
-                if active_pid is not None:
-                    p = store.persons.get(int(active_pid))
-                    if p:
-                        count = min(len(p.get("passive", {}).get(f, [])) for f in _FEATURES)
-                id_label = f"ID:{active_pid}" if active_pid is not None else "..."
-                cv2.putText(
-                    frame,
-                    f"Learning baseline for {id_label} ({count}/{PASSIVE_MIN_SAMPLES})",
-                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
-                )
-            else:
-                gauge_x, gauge_y, gauge_w, gauge_h = 20, 20, 200, 20
-                display_score = smoothed_stress if smoothed_stress is not None else 0.0
-                color = stress_color(display_score)
-                cv2.rectangle(
-                    frame, (gauge_x, gauge_y),
-                    (gauge_x + gauge_w, gauge_y + gauge_h), (200, 200, 200), 2,
-                )
-                fill_w = int(gauge_w * display_score / 100)
-                if fill_w > 0:
+                # 較正/学習の進捗 or ストレスゲージ
+                if calibrating:
+                    buf = calib_buf.get(active_pid)
+                    remaining = (
+                        max(0.0, CALIB_SECONDS - (elapsed - buf["t0"])) if buf else CALIB_SECONDS
+                    )
+                    cv2.putText(
+                        frame,
+                        f"CALIBRATING... keep a neutral face ({remaining:.0f}s)",
+                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
+                    )
+                elif active_baseline is None:
+                    # passiveモード: そのIDの"普段"サンプルがまだ足りない。ポーズは指示せず
+                    # 状況だけ表示する（明示的な較正指示が基準を歪める、という指摘への対応）。
+                    count = 0
+                    if active_pid is not None:
+                        p = store.persons.get(int(active_pid))
+                        if p:
+                            count = min(len(p.get("passive", {}).get(f, [])) for f in _FEATURES)
+                    id_label = f"ID:{active_pid}" if active_pid is not None else "..."
+                    cv2.putText(
+                        frame,
+                        f"Learning baseline for {id_label} ({count}/{PASSIVE_MIN_SAMPLES})",
+                        (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
+                    )
+                else:
+                    gauge_x, gauge_y, gauge_w, gauge_h = 20, 20, 200, 20
+                    display_score = smoothed_stress if smoothed_stress is not None else 0.0
+                    color = stress_color(display_score)
                     cv2.rectangle(
                         frame, (gauge_x, gauge_y),
-                        (gauge_x + fill_w, gauge_y + gauge_h), color, -1,
+                        (gauge_x + gauge_w, gauge_y + gauge_h), (200, 200, 200), 2,
                     )
-                cv2.putText(
-                    frame, f"Stress: {display_score:.0f}",
-                    (gauge_x, gauge_y + gauge_h + 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
-                )
-                # 参考値（小さく表示）
-                cv2.putText(
-                    frame,
-                    f"brow:{last_brow:.2f} blink:{blink_rate:.0f}/min",
-                    (gauge_x, gauge_y + gauge_h + 42),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
-                )
-                cv2.putText(
-                    frame,
-                    f"head:{last_head:.0f}deg/s mouth:{last_mouth:.2f} eye:{last_eye:.2f}",
-                    (gauge_x, gauge_y + gauge_h + 60),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
-                )
-                # 移動(並進)速度と頭部ゲート。歩行中は loco が上がり gate が 0 に近づく。
-                # 閾値(LOCO_GATE_LOW/HIGH)を調整する際はこの loco の値を目安にする。
-                loco_gate = locomotion_gate(last_loco)
-                moving = loco_gate < 1.0
-                cv2.putText(
-                    frame,
-                    f"loco:{last_loco:.1f} head_gate:{loco_gate:.2f}"
-                    + ("  MOVING" if moving else ""),
-                    (gauge_x, gauge_y + gauge_h + 78),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.45,
-                    (0, 165, 255) if moving else (200, 200, 200), 1,
-                )
+                    fill_w = int(gauge_w * display_score / 100)
+                    if fill_w > 0:
+                        cv2.rectangle(
+                            frame, (gauge_x, gauge_y),
+                            (gauge_x + fill_w, gauge_y + gauge_h), color, -1,
+                        )
+                    cv2.putText(
+                        frame, f"Stress: {display_score:.0f}",
+                        (gauge_x, gauge_y + gauge_h + 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2,
+                    )
+                    # 参考値（小さく表示）
+                    cv2.putText(
+                        frame,
+                        f"brow:{last_brow:.2f} blink:{blink_rate:.0f}/min",
+                        (gauge_x, gauge_y + gauge_h + 42),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
+                    )
+                    cv2.putText(
+                        frame,
+                        f"head:{last_head:.0f}deg/s mouth:{last_mouth:.2f} eye:{last_eye:.2f}",
+                        (gauge_x, gauge_y + gauge_h + 60),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45, (200, 200, 200), 1,
+                    )
+                    # 移動(並進)速度と頭部ゲート。歩行中は loco が上がり gate が 0 に近づく。
+                    # 閾値(LOCO_GATE_LOW/HIGH)を調整する際はこの loco の値を目安にする。
+                    loco_gate = locomotion_gate(last_loco)
+                    moving = loco_gate < 1.0
+                    cv2.putText(
+                        frame,
+                        f"loco:{last_loco:.1f} head_gate:{loco_gate:.2f}"
+                        + ("  MOVING" if moving else ""),
+                        (gauge_x, gauge_y + gauge_h + 78),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                        (0, 165, 255) if moving else (200, 200, 200), 1,
+                    )
 
-            if not face_present:
-                cv2.putText(
-                    frame, "No face detected", (20, frame_h - 20),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
-                )
+                if not face_present:
+                    cv2.putText(
+                        frame, "No face detected", (20, frame_h - 20),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2,
+                    )
 
-            cv2.putText(
-                frame, f"FPS: {fps_smoothed:.1f}", (frame_w - 130, 30),
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
-            )
+                cv2.putText(
+                    frame, f"FPS: {fps_smoothed:.1f}", (frame_w - 130, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
+                )
 
             if show_video:
                 cv2.imshow("Stress Evaluation (press q to quit)", frame)
