@@ -22,6 +22,7 @@ from config import DATA_DIR, MODEL_DIR, REPO_DIR  # noqa: E402
 MOVES = [
     ("person_profiles.json", DATA_DIR),
     ("session_history.jsonl", DATA_DIR),
+    ("session_history.csv", DATA_DIR),
     ("stai_dataset.jsonl", DATA_DIR),
     ("stress_log.csv", DATA_DIR),
     ("stress_graph.png", DATA_DIR),

@@ -22,6 +22,7 @@ models/
 # ---- 実行時の生成物（MIRS_DATA_DIR に出るのが正だが、旧配置の名残も除外）----
 person_profiles.json
 session_history.jsonl
+session_history.csv
 stai_dataset.jsonl
 stress_log.csv
 stress_graph.png

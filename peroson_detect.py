@@ -86,6 +86,9 @@ from config import (
     LOCO_GATE_LOW,
     LOCO_GATE_HIGH,
     CALIB_SECONDS,
+    BASELINE_MODE,
+    PASSIVE_WINDOW_SAMPLES,
+    PASSIVE_MIN_SAMPLES,
     BLINK_ON_THRESHOLD,
     BLINK_OFF_THRESHOLD,
     BLINK_WINDOW_SEC,
@@ -127,6 +130,8 @@ from config import (
     STAI_SCALE_MIN,
     STAI_SCALE_MAX,
     STAI_ITEMS_PER_SCALE,
+    OUTPUT_MODE,
+    CAMERA_SOURCE,
 )
 
 # ============================================================================
@@ -164,7 +169,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
     global STRESS_BASE_LEVEL, STRESS_Z_GAIN, RUN_MODE, STAI_S_FORM
     global EMO_STD_FLOOR, BROW_STD_FLOOR, BLINK_STD_FLOOR
     global HEAD_STD_FLOOR, MOUTH_STD_FLOOR, EYE_STD_FLOOR
-    global CORAL_ENABLED, CORAL_MODEL_PATH, CORAL_DEVICE
+    global CORAL_ENABLED, CORAL_MODEL_PATH, CORAL_DEVICE, OUTPUT_MODE
 
     if not os.path.exists(path):
         try:
@@ -184,6 +189,7 @@ def load_stress_config(path=STRESS_CONFIG_PATH):
 
     RUN_MODE = str(cfg.get("mode", RUN_MODE)).lower()
     STAI_S_FORM = str(cfg.get("stai_s_form", STAI_S_FORM)).lower()
+    OUTPUT_MODE = str(cfg.get("output_mode", OUTPUT_MODE)).lower()
 
     # 重み（キーは既存のものだけ採用し、欠けは現行値を維持）
     for k, v in (cfg.get("weights") or {}).items():
@@ -947,6 +953,24 @@ def welford_std(stat, floor):
     return max(float(np.sqrt(max(var, 0.0))), floor)
 
 
+def _build_baseline_from_samples(emo, brow, head, mouth, eye, blink_rate):
+    """explicitモード用: 較正ウィンドウで集めた生サンプルから平均/標準偏差ベースの
+    ベースライン辞書を作る（compose_stress が要求する {feature}_mean/{feature}_std 形）。"""
+    emo_arr = np.array(emo) if emo else np.array([0.0])
+    brow_arr = np.array(brow) if brow else np.array([0.0])
+    head_arr = np.array(head) if head else np.array([0.0])
+    mouth_arr = np.array(mouth) if mouth else np.array([0.0])
+    eye_arr = np.array(eye) if eye else np.array([0.0])
+    return {
+        "emo_mean": float(emo_arr.mean()), "emo_std": float(emo_arr.std()),
+        "brow_mean": float(brow_arr.mean()), "brow_std": float(brow_arr.std()),
+        "blink_mean": blink_rate, "blink_std": BLINK_STD_FLOOR,
+        "head_mean": float(head_arr.mean()), "head_std": float(head_arr.std()),
+        "mouth_mean": float(mouth_arr.mean()), "mouth_std": float(mouth_arr.std()),
+        "eye_mean": float(eye_arr.mean()), "eye_std": float(eye_arr.std()),
+    }
+
+
 def face_id_backend_tag(id_backend):
     """埋め込みはバックエンド間で非互換なので、どのバックエンドで作った埋め込みかを識別する。"""
     if id_backend == "deepface":
@@ -1039,6 +1063,44 @@ class PersonStore:
         if blink_rate is not None:
             welford_update(bl["blink"], float(blink_rate))  # 平常瞬目率（1セッション1サンプル）
         return self.baseline_dict(pid)
+
+    def passive_append(self, person_id, feature, value):
+        """passiveモード用: 直近 PASSIVE_WINDOW_SAMPLES 件の生サンプルをID・特徴量ごとに
+        保持する（頑健統計はここでは計算せず、都度 passive_baseline_dict で計算する）。"""
+        pid = int(person_id)
+        p = self.persons.get(pid)
+        if p is None:
+            p = {
+                "embedding": None,
+                "created": datetime.now().isoformat(timespec="seconds"),
+                "updated": None,
+                "session_count": 0,
+                "baseline": {f: _new_welford() for f in _FEATURES},
+            }
+            self.persons[pid] = p
+        lst = p.setdefault("passive", {}).setdefault(feature, [])
+        lst.append(float(value))
+        if len(lst) > PASSIVE_WINDOW_SAMPLES:
+            del lst[: len(lst) - PASSIVE_WINDOW_SAMPLES]
+
+    def passive_baseline_dict(self, person_id):
+        """全特徴量が PASSIVE_MIN_SAMPLES 件に達していれば、中央値/MAD ベースの
+        ベースライン辞書を返す。頑健統計なので一時的な緊張フレームが多少混ざっても
+        “普段”の中心・広がりはほぼ動かない。不足していれば None（評価保留）。"""
+        p = self.persons.get(int(person_id))
+        if not p or not p.get("passive"):
+            return None
+        out = {}
+        for f in _FEATURES:
+            samples = p["passive"].get(f, [])
+            if len(samples) < PASSIVE_MIN_SAMPLES:
+                return None
+            arr = np.array(samples)
+            med = float(np.median(arr))
+            mad = float(np.median(np.abs(arr - med)))
+            out[f"{f}_mean"] = med
+            out[f"{f}_std"] = max(1.4826 * mad, _FEATURE_STD_FLOORS[f])  # 1.4826=MAD→std換算係数
+        return out
 
     def save(self, path, gallery, session_summaries, history_path, stai_by_pid=None):
         """最新の埋め込み・session_count を書き戻し、セッション履歴(JSONL/CSV)を追記する。
@@ -1194,7 +1256,9 @@ def save_stress_report(stress_history):
 # メイン
 # ============================================================================
 
-def main():
+def main(on_sample=None, should_stop=None, show_video=True):
+    """on_sample(now, pid, score): ストレス算出のたびに呼ぶ（ROS2連携用）。
+    should_stop(): True を返すとループを抜ける。show_video=False で映像ウィンドウを出さない。"""
     # チューニング済みパラメータと実行モードを最初に取り込む（無ければ雛形を作成）。
     load_stress_config()
 
@@ -1237,7 +1301,7 @@ def main():
             "顔識別が有効です（ランドマーク方式 / 簡易・別人分離は弱い）。"
             "別人を分けたい場合は DeepFace/insightface を使ってください。"
         )
-
+ 
     # 永続化された人物プロファイル（顔埋め込み・平常状態統計）を読み込み、
     # トラッカへ既知人物を注入する（セッションをまたいで同じ顔に同じID＝定点観測）。
     store = PersonStore.load(PROFILES_JSON_PATH, face_id_backend_tag(id_backend))
@@ -1252,7 +1316,7 @@ def main():
     }
     person_baselines = {pid: bl for pid, bl in person_baselines.items() if bl is not None}
 
-    cap = cv2.VideoCapture(0)  # 0 = 既定のカメラ
+    cap = cv2.VideoCapture(CAMERA_SOURCE)  # 0 = 既定のカメラ / 文字列なら動画ファイル等
     if not cap.isOpened():
         print("カメラを開けませんでした。デバイス番号や接続を確認してください。")
         landmarker.close()
@@ -1280,20 +1344,22 @@ def main():
     head_tracker = HeadMotionTracker()
     loco_tracker = LocomotionTracker()
 
-    # 較正フェーズ用のサンプル蓄積
-    calibrating = True
-    calib_emo = []
-    calib_brow = []
-    calib_head = []
-    calib_mouth = []
-    calib_eye = []
-    baseline = None                # 顔識別が無い場合のセッション限りフォールバック
+    # ベースライン学習用の状態。
+    # passiveモード: PersonStoreの passive フィールドに直接サンプルを貯める（IDごと、
+    # セッションを跨いで蓄積）ので、ここではローカルなバッファは不要。
+    # explicitモード（または顔識別が無効な場合のフォールバック）だけが、確定前の
+    # このセッション限りの較正バッファ calib_buf を使う。
+    calib_buf = {}                 # explicitモード専用: pid -> {"t0","emo","brow","head","mouth","eye"}
+    calibrating = False            # explicitモードで、現在アクティブなIDがまだ較正中か
     smoothed_stress = None
     stress_history = []
     # 人物ごとのセッション要約（session_history.jsonl / プロファイル更新に使う）
     session_summaries = {}         # pid -> {"samples","sum","max","first_t","last_t"}
 
-    print("起動しました。まず数秒間、平常な表情を保ってください（較正中）。")
+    if BASELINE_MODE == "passive" and id_tracker is not None:
+        print("起動しました。普段どおりに使ってください（普段の表情を自動で学習します）。")
+    else:
+        print("起動しました。まず数秒間、平常な表情を保ってください（較正中）。")
 
     try:
         while True:
@@ -1396,126 +1462,119 @@ def main():
 
             blink_rate = blink_counter.rate_per_min(now, session_start)
 
-            # ================= 較正フェーズ =================
-            if calibrating:
-                if face_present:
-                    calib_brow.append(last_brow)
-                    # 移動中の頭部運動は平常ベースラインに含めない（移動＝ストレスと誤らせない）
+            # ================= ベースライン学習（IDごと） =================
+            # 他人のベースラインを絶対に使わない：そのID専用の"普段"が無ければ、
+            # そのIDについてだけ学習が完了するまで評価を保留する。
+            active_pid = last_face_id
+            use_passive = BASELINE_MODE == "passive" and id_tracker is not None
+
+            if use_passive:
+                # 明示的な待機フェーズなし。利用中に常時サンプルを蓄積し、頑健統計
+                # （中央値/MAD）で外れ値（一時的な緊張等）を抑えた"普段"を作る。
+                calibrating = False
+                if face_present and active_pid is not None:
+                    store.passive_append(active_pid, "brow", last_brow)
+                    # 移動中の頭部運動は"普段"に含めない（移動＝ストレスと誤らせない）
                     if locomotion_gate(last_loco) > 0.5:
-                        calib_head.append(last_head)
-                    calib_mouth.append(last_mouth)
-                    calib_eye.append(last_eye)
+                        store.passive_append(active_pid, "head", last_head)
+                    store.passive_append(active_pid, "mouth", last_mouth)
+                    store.passive_append(active_pid, "eye", last_eye)
+                    store.passive_append(active_pid, "blink", blink_rate)
                     if smoothed_probs is not None:
-                        calib_emo.append(last_emo_neg)
-
-                if elapsed >= CALIB_SECONDS:
-                    # ベースライン統計を確定
-                    emo_arr = np.array(calib_emo) if calib_emo else np.array([0.0])
-                    brow_arr = np.array(calib_brow) if calib_brow else np.array([0.0])
-                    head_arr = np.array(calib_head) if calib_head else np.array([0.0])
-                    mouth_arr = np.array(calib_mouth) if calib_mouth else np.array([0.0])
-                    eye_arr = np.array(calib_eye) if calib_eye else np.array([0.0])
-                    baseline = {
-                        "emo_mean": float(emo_arr.mean()),
-                        "emo_std": float(emo_arr.std()),
-                        "brow_mean": float(brow_arr.mean()),
-                        "brow_std": float(brow_arr.std()),
-                        "blink_mean": blink_rate,          # 較正中の平常瞬目率
-                        "blink_std": BLINK_STD_FLOOR,      # 瞬目率は分散推定が不安定なので下限を使う
-                        "head_mean": float(head_arr.mean()),
-                        "head_std": float(head_arr.std()),
-                        "mouth_mean": float(mouth_arr.mean()),
-                        "mouth_std": float(mouth_arr.std()),
-                        "eye_mean": float(eye_arr.mean()),
-                        "eye_std": float(eye_arr.std()),
-                    }
-                    # 顔識別で人物が特定できていれば、蓄積統計へマージして“普段”を更新。
-                    # 既知の人物なら過去の平常が効いて初回フレームから相対評価できる（定点観測）。
-                    calib_person_id = last_face_id
-                    if calib_person_id is not None:
-                        session_samples = {
-                            "emo": calib_emo,
-                            "brow": calib_brow,
-                            "head": calib_head,
-                            "mouth": calib_mouth,
-                            "eye": calib_eye,
-                            "blink": blink_rate,
-                        }
-                        merged = store.ingest_calibration(calib_person_id, session_samples)
-                        if merged is not None:
-                            person_baselines[calib_person_id] = merged
-                            baseline = merged  # 蓄積後の平常をこのセッションの基準に採用
-                            print(
-                                f"人物 ID={calib_person_id} の平常状態を更新しました"
-                                f"（累計 {store.persons[calib_person_id]['baseline']['brow']['count']} サンプル）。"
-                            )
-
-                    calibrating = False
-                    print(
-                        "較正完了。ベースライン: "
-                        f"emo={baseline['emo_mean']:.2f}, "
-                        f"brow={baseline['brow_mean']:.2f}, "
-                        f"blink={baseline['blink_mean']:.1f}/min, "
-                        f"head={baseline['head_mean']:.1f}deg/s, "
-                        f"mouth={baseline['mouth_mean']:.2f}, "
-                        f"eye={baseline['eye_mean']:.2f}"
-                    )
-            # ================= 評価フェーズ =================
+                        store.passive_append(active_pid, "emo", last_emo_neg)
+                    person_baselines[active_pid] = store.passive_baseline_dict(active_pid)
             else:
-                # その人の“普段”に対して評価する。蓄積プロファイルがあればそれを、
-                # 無ければ（顔識別オフ時など）セッション較正のフォールバックを使う。
-                active_baseline = person_baselines.get(last_face_id, baseline)
-                if face_present and active_baseline is not None:
-                    # zスコア成分を一度だけ計算し、スコア化と（STAI連動チューニング用の）
-                    # セッション平均zの集計の両方に使い回す。
-                    z_comp = stress_z_components(
-                        last_emo_neg, last_brow, blink_rate,
-                        last_head, last_mouth, last_eye, active_baseline,
-                        head_gate=locomotion_gate(last_loco),  # 移動中は頭部運動を抑制
+                # explicitモード、または顔識別が無効(id_tracker is None)な場合のフォールバック
+                # （IDを跨いだ学習ができないためグローバル1回だけの較正になる）。
+                calibrating = face_present and active_pid not in person_baselines
+                if calibrating:
+                    buf = calib_buf.setdefault(active_pid, {
+                        "t0": elapsed, "emo": [], "brow": [], "head": [], "mouth": [], "eye": [],
+                    })
+                    buf["brow"].append(last_brow)
+                    if locomotion_gate(last_loco) > 0.5:
+                        buf["head"].append(last_head)
+                    buf["mouth"].append(last_mouth)
+                    buf["eye"].append(last_eye)
+                    if smoothed_probs is not None:
+                        buf["emo"].append(last_emo_neg)
+
+                    if elapsed - buf["t0"] >= CALIB_SECONDS:
+                        if active_pid is not None:
+                            # 顔識別で人物が特定できていれば、蓄積統計へマージして“普段”を更新。
+                            # 既知の人物なら過去の平常が効いて初回フレームから相対評価できる（定点観測）。
+                            merged = store.ingest_calibration(active_pid, {
+                                "emo": buf["emo"], "brow": buf["brow"], "head": buf["head"],
+                                "mouth": buf["mouth"], "eye": buf["eye"], "blink": blink_rate,
+                            })
+                            person_baselines[active_pid] = merged
+                            print(
+                                f"人物 ID={active_pid} の平常状態を確定しました"
+                                f"（累計 {store.persons[active_pid]['baseline']['brow']['count']} サンプル）。"
+                            )
+                        else:
+                            person_baselines[None] = _build_baseline_from_samples(
+                                buf["emo"], buf["brow"], buf["head"], buf["mouth"], buf["eye"], blink_rate,
+                            )
+                            print("較正完了（顔識別なし・セッション限り）。")
+                        del calib_buf[active_pid]
+                        calibrating = False
+
+            # ================= 評価 =================
+            active_baseline = person_baselines.get(active_pid)
+            if not calibrating and face_present and active_baseline is not None:
+                # zスコア成分を一度だけ計算し、スコア化と（STAI連動チューニング用の）
+                # セッション平均zの集計の両方に使い回す。
+                z_comp = stress_z_components(
+                    last_emo_neg, last_brow, blink_rate,
+                    last_head, last_mouth, last_eye, active_baseline,
+                    head_gate=locomotion_gate(last_loco),  # 移動中は頭部運動を抑制
+                )
+                raw_score = stress_from_z(z_comp)
+                if smoothed_stress is None:
+                    smoothed_stress = raw_score
+                else:
+                    smoothed_stress = (
+                        STRESS_EMA_ALPHA * raw_score
+                        + (1 - STRESS_EMA_ALPHA) * smoothed_stress
                     )
-                    raw_score = stress_from_z(z_comp)
-                    if smoothed_stress is None:
-                        smoothed_stress = raw_score
-                    else:
-                        smoothed_stress = (
-                            STRESS_EMA_ALPHA * raw_score
-                            + (1 - STRESS_EMA_ALPHA) * smoothed_stress
-                        )
-                    dominant = (
-                        max(smoothed_probs, key=smoothed_probs.get)
-                        if smoothed_probs
-                        else ""
+                dominant = (
+                    max(smoothed_probs, key=smoothed_probs.get)
+                    if smoothed_probs
+                    else ""
+                )
+                # 人物ごとのセッション要約を集計（定点観測の日次トレンド用）。
+                # z_sum には6成分zを累積し、セッション平均zを STAI データセットに残す。
+                if active_pid is not None:
+                    s = session_summaries.setdefault(
+                        active_pid,
+                        {"samples": 0, "sum": 0.0, "max": 0.0,
+                         "first_t": elapsed, "last_t": elapsed,
+                         "z_sum": {f: 0.0 for f in _FEATURES}},
                     )
-                    # 人物ごとのセッション要約を集計（定点観測の日次トレンド用）。
-                    # z_sum には6成分zを累積し、セッション平均zを STAI データセットに残す。
-                    if last_face_id is not None:
-                        s = session_summaries.setdefault(
-                            last_face_id,
-                            {"samples": 0, "sum": 0.0, "max": 0.0,
-                             "first_t": elapsed, "last_t": elapsed,
-                             "z_sum": {f: 0.0 for f in _FEATURES}},
-                        )
-                        s["samples"] += 1
-                        s["sum"] += smoothed_stress
-                        s["max"] = max(s["max"], smoothed_stress)
-                        s["last_t"] = elapsed
-                        for f in _FEATURES:
-                            s["z_sum"][f] += z_comp[f]
-                    stress_history.append(
-                        (
-                            elapsed,
-                            frame_count,
-                            last_face_id,
-                            smoothed_stress,
-                            dominant,
-                            last_emo_neg,
-                            last_brow,
-                            blink_rate,
-                            last_head,
-                            last_mouth,
-                            last_eye,
-                        )
+                    s["samples"] += 1
+                    s["sum"] += smoothed_stress
+                    s["max"] = max(s["max"], smoothed_stress)
+                    s["last_t"] = elapsed
+                    for f in _FEATURES:
+                        s["z_sum"][f] += z_comp[f]
+                stress_history.append(
+                    (
+                        elapsed,
+                        frame_count,
+                        active_pid,
+                        smoothed_stress,
+                        dominant,
+                        last_emo_neg,
+                        last_brow,
+                        blink_rate,
+                        last_head,
+                        last_mouth,
+                        last_eye,
                     )
+                )
+                if on_sample is not None:
+                    on_sample(now, active_pid, smoothed_stress)
 
             # ================= 描画 =================
             if face_present and last_bbox is not None:
@@ -1543,12 +1602,29 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 2,
                     )
 
-            # 較正の進捗 or ストレスゲージ
+            # 較正/学習の進捗 or ストレスゲージ
             if calibrating:
-                remaining = max(0.0, CALIB_SECONDS - elapsed)
+                buf = calib_buf.get(active_pid)
+                remaining = (
+                    max(0.0, CALIB_SECONDS - (elapsed - buf["t0"])) if buf else CALIB_SECONDS
+                )
                 cv2.putText(
                     frame,
                     f"CALIBRATING... keep a neutral face ({remaining:.0f}s)",
+                    (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
+                )
+            elif active_baseline is None:
+                # passiveモード: そのIDの"普段"サンプルがまだ足りない。ポーズは指示せず
+                # 状況だけ表示する（明示的な較正指示が基準を歪める、という指摘への対応）。
+                count = 0
+                if active_pid is not None:
+                    p = store.persons.get(int(active_pid))
+                    if p:
+                        count = min(len(p.get("passive", {}).get(f, [])) for f in _FEATURES)
+                id_label = f"ID:{active_pid}" if active_pid is not None else "..."
+                cv2.putText(
+                    frame,
+                    f"Learning baseline for {id_label} ({count}/{PASSIVE_MIN_SAMPLES})",
                     (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2,
                 )
             else:
@@ -1607,14 +1683,18 @@ def main():
                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2,
             )
 
-            cv2.imshow("Stress Evaluation (press q to quit)", frame)
-            if cv2.waitKey(1) & 0xFF == ord("q"):
+            if show_video:
+                cv2.imshow("Stress Evaluation (press q to quit)", frame)
+                if cv2.waitKey(1) & 0xFF == ord("q"):
+                    break
+            if should_stop is not None and should_stop():
                 break
     except KeyboardInterrupt:
         print("Ctrl+Cで中断されました。")
     finally:
         cap.release()
-        cv2.destroyAllWindows()
+        if show_video:
+            cv2.destroyAllWindows()
         landmarker.close()  # mediapipe の終了時例外を避けるため明示的に閉じる
         save_stress_report(stress_history)
 
@@ -1935,4 +2015,11 @@ def run_stai_survey(session_summaries):
 
 
 if __name__ == "__main__":
-    main()
+    load_stress_config()  # OUTPUT_MODE を決めるため先に読む（main 内の再読込は冪等）
+    if OUTPUT_MODE == "legacy":
+        main()
+    elif OUTPUT_MODE in ("ros2", "both"):
+        from stress_alert_node import run_ros_node  # rclpy は ROS 利用時のみ必要
+        run_ros_node(show_video=(OUTPUT_MODE == "both"))
+    else:
+        raise SystemExit(f"不明な output_mode です: {OUTPUT_MODE}（legacy|ros2|both）")

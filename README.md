@@ -219,3 +219,36 @@ python tune_stress.py --apply
 *   **目的制限**: 本ソフトウェアは、リアルタイム表情分析およびストレス測定の実験・研究、またはホビー用途を目的として開発されたものです。
 *   **非医療機器**: 本ソフトウェアは**医療機器ではなく、専門的な精神医学的・心理学的診断、治療、または予防を目的としたものではありません**。ストレス値や不安度の算出結果は学術的アプローチによる統計的推定であり、医学的な妥当性や診断を保証するものではありません。
 *   **免責**: 本ソフトウェアの利用、機能、診断結果、または本ソフトウェアに含まれる情報によって、直接的・間接的を問わず発生したいかなる損害（肉体的・精神的不調、業務の中断、利益の損失、データの損失、その他付随的・派生的なすべての損害）について、**開発者および提供者は一切の責任および義務を負いません**。本ソフトウェアの使用は、すべてユーザー自身の自己責任において行ってください。
+
+---
+
+## 🤖 ROS2 ノードとして使う（Jazzy）
+
+`config.py` の `OUTPUT_MODE`（または `stress_config.json` の `"output_mode"`）で出力を切り替えます。起動は常に `python peroson_detect.py`。
+
+| OUTPUT_MODE | 映像表示 | ROS2 publish |
+|---|---|---|
+| `legacy`（既定） | あり | なし |
+| `ros2` | なし（ヘッドレス） | あり |
+| `both` | あり | あり |
+
+高ストレス（`ALERT_THRESHOLD` 以上）が `ALERT_HOLD_SEC` 秒以上続くと `/stress/alert` が `True` になります。判定は `ALERT_MODE`（`any`=誰か1人でも / `mean`=その場全体の平均）。判定ロジックは ROS 非依存の [stress_alert.py](stress_alert.py)（`python stress_alert.py` で自己チェック）。
+
+| トピック | 型 | 内容 |
+|---|---|---|
+| `/stress/alert` | `std_msgs/Bool`（transient_local） | 高ストレス継続中か |
+| `/stress/alert_ids` | `std_msgs/Int32MultiArray` | アラート中の人物ID |
+| `/stress/max`, `/stress/mean` | `std_msgs/Float32` | 在席者の最大/平均ストレス |
+
+ノードパラメータ: `alert_threshold`, `alert_hold_sec`, `alert_stale_sec`, `alert_mode`（`--ros-args -p alert_mode:=mean` で上書き）。
+
+```bash
+# WSL / Ubuntu 24.04 (Jazzy)
+python3 -m venv --system-site-packages .venv && source .venv/bin/activate   # rclpy を見せる
+pip install -r requirements.txt
+source /opt/ros/jazzy/setup.bash
+python peroson_detect.py            # OUTPUT_MODE=ros2/both のとき
+ros2 topic echo /stress/alert
+```
+
+WSL2 は既定でUSBカメラを認識しないため、`config.py` の `CAMERA_SOURCE` に動画ファイルのパスを指定して試すか、`usbipd` でカメラをattachしてください。
