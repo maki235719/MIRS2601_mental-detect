@@ -12,8 +12,22 @@ PYTHON ?= python
         bootstrap deploy freeze paths migrate prefetch serve ros2
 
 help:
-	@echo "dev  : run | serve | ros2 | clean | clean-profiles | clean-all | show-profiles | paths"
-	@echo "prod : bootstrap | deploy | freeze | migrate | prefetch"
+	@echo "[dev]  (Windows: .\\run.ps1 <target>)"
+	@echo "  run            通常起動（カメラ映像＋HUD）"
+	@echo "  serve          評価サーバー起動 http://localhost:8000/ (PORT, STRESS_TOKEN)"
+	@echo "  ros2           ROS2ノード起動 (ROS_MODE=both で映像表示あり)"
+	@echo "  paths          出力先・モデル置き場を表示"
+	@echo "  show-profiles  保存済みプロファイルを表示"
+	@echo "  clean          セッション出力（CSV・グラフ）を削除"
+	@echo "  clean-profiles 学習した平常状態・人物IDを削除"
+	@echo "  clean-all      clean + clean-profiles"
+	@echo "[prod] (make のみ / Raspberry Pi)"
+	@echo "  bootstrap      初回セットアップ（venv・データ領域・モデル取得）"
+	@echo "  deploy         GitHub の最新版へ更新"
+	@echo "  freeze         依存バージョンを requirements.lock.txt に固定"
+	@echo "  migrate        旧配置の生成物・モデルを DATA_DIR へ移行"
+	@echo "  prefetch       モデルを事前ダウンロード"
+	@echo "詳細: COMMANDS.md"
 
 run:
 	$(PYTHON) peroson_detect.py
