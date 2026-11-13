@@ -2031,7 +2031,13 @@ if __name__ == "__main__":
     if OUTPUT_MODE == "legacy":
         main()
     elif OUTPUT_MODE in ("ros2", "both"):
-        from stress_alert_node import run_ros_node  # rclpy は ROS 利用時のみ必要
+        try:
+            from stress_alert_node import run_ros_node  # rclpy は ROS 利用時のみ必要
+        except ModuleNotFoundError as e:
+            if e.name != "rclpy":
+                raise
+            raise SystemExit("rclpy がありません（ROS2 は Linux/Jazzy 環境のみ）。"
+                             "Windows では `python peroson_detect.py --output-mode legacy` で起動してください。")
         run_ros_node(show_video=(OUTPUT_MODE == "both"))
     else:
         raise SystemExit(f"不明な output_mode です: {OUTPUT_MODE}（legacy|ros2|both）")

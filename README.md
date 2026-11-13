@@ -246,6 +246,8 @@ ros2 topic echo /stress/alert
 
 `--output-mode legacy|ros2|both` は config / `stress_config.json` の `output_mode` を一時的に上書きします。`.\run.ps1 ros2` でも同じです。
 
+> **注意（Windows）**: `ros2` / `both` は `rclpy` が必要で、Linux（WSL / Ubuntu 24.04 + ROS2 Jazzy）でのみ動きます。ネイティブ Windows では `ModuleNotFoundError: No module named 'rclpy'` になるので、`python peroson_detect.py --output-mode legacy`（または `.\run.ps1 run`）で起動してください。`legacy` でも同じエラーが出る場合は `stress_config.json` の `output_mode` を確認してください。
+
 WSL2 は既定でUSBカメラを認識しないため、`config.py` の `CAMERA_SOURCE` に動画ファイルのパスを指定して試すか、`usbipd` でカメラをattachしてください。
 
 ***
