@@ -325,13 +325,15 @@ def main():
                     help="STAI-S に連動するよう重み等を最適化し config に書き戻す")
     ap.add_argument("--no-trait", action="store_true",
                     help="STAI-T を共変量に使わない")
+    ap.add_argument("--dataset", default=DATASET_PATH,
+                    help="stai_dataset.jsonl のパス（既定: 同フォルダのもの。merge_data.py の出力を指定可）")
     args = ap.parse_args()
 
     if not (args.report or args.apply):
         args.report = True  # 既定はレポート
 
     cfg = load_config()
-    recs = load_dataset()
+    recs = load_dataset(args.dataset)
     if not recs:
         raise SystemExit("使用可能なレコードがありません（STAI-S 入力済みのセッションが必要です）。")
 
