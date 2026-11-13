@@ -77,8 +77,23 @@ LOCO_EMA_ALPHA = 0.4         # 並進速度の時間平滑化係数（0-1, 大�
 LOCO_GATE_LOW = 8.0          # これ以下は「静止」→頭部運動をフル採用（gate=1.0）
 LOCO_GATE_HIGH = 25.0        # これ以上は「移動中」→頭部運動を無効化（gate=0.0）
 
-# 較正（ベースライン測定）フェーズの長さ（秒）
+# 較正（ベースライン測定）フェーズの長さ（秒）。BASELINE_MODE="explicit" の時のみ使う。
 CALIB_SECONDS = 7.0
+
+# 較正方式:
+#   "passive" (既定) : 明示的な待機フェーズなし。利用中に常時サンプルを蓄積し、
+#                       頑健統計（中央値・MAD）で外れ値（一時的な緊張等）を
+#                       自動的に除外した"普段"を作る。「普段の顔をしてください」と
+#                       意識させないことで、そのポーズ自体が基準を歪めるのを防ぐ。
+#   "explicit"        : 起動時に「そのIDを初めて検知してからCALIB_SECONDS秒」
+#                       普段の顔を指示して測定する（旧方式のID単位版）。
+BASELINE_MODE = "passive"
+
+# passiveモード: 直近何サンプルを"普段"の母集団として保持するか（ID・特徴量ごと）
+PASSIVE_WINDOW_SAMPLES = 900
+
+# passiveモード: ベースラインとして使い始めるための最低サンプル数
+PASSIVE_MIN_SAMPLES = 60
 
 # まばたき検出（blendshape eyeBlink のしきい値・ヒステリシス）と集計窓
 BLINK_ON_THRESHOLD = 0.5
@@ -125,6 +140,8 @@ FACE_ID_SIM_THRESHOLD_LMK = 0.99  # 類似度がこれ以上なら同一人物�
 # 【重要】生成物（ログ・プロファイル・自動DLしたモデル）をリポジトリ内に置くと、
 # 実行するたびに作業ツリーが汚れて `git pull` が「先にcommitしてください」で
 # 止まる。そのため出力先とモデルキャッシュはリポジトリの外に置く。
+# 既定ではリポジトリの一つ上の階層の `MIRS_data` フォルダに置く（隠しフォルダの
+# 深い階層に埋もれないよう、分かりやすい場所にする）。
 #
 # 環境変数で上書き可能:
 #   MIRS_DATA_DIR  : ログ・人物プロファイル・STAIデータセットの保存先
@@ -135,16 +152,8 @@ REPO_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _default_base_dir():
-    """OS ごとの標準的なユーザーデータ置き場を返す。"""
-    if os.name == "nt":
-        base = os.environ.get("LOCALAPPDATA") or os.path.join(
-            os.path.expanduser("~"), "AppData", "Local"
-        )
-    else:
-        base = os.environ.get("XDG_DATA_HOME") or os.path.join(
-            os.path.expanduser("~"), ".local", "share"
-        )
-    return os.path.join(base, "mirs-stress")
+    """既定の保存先: リポジトリの一つ上の階層に MIRS_data を作る。"""
+    return os.path.join(os.path.dirname(REPO_DIR), "MIRS_data")
 
 
 def _resolve_dir(env_name, default_path):
@@ -164,13 +173,7 @@ STRESS_CSV_PATH = os.path.join(OUTPUT_DIR, "stress_log.csv")
 STRESS_GRAPH_PATH = os.path.join(OUTPUT_DIR, "stress_graph.png")
 # チューニング可能なパラメータ（重み・ゲイン・基準・分散下限）の外部設定ファイル。
 # tune_stress.py が STAI 連動になるよう最適化して書き戻す先でもある。
-# リポジトリ直下に stress_config.json があればそれを優先する（無ければ従来どおり DATA_DIR 側）。
-# これにより、リポジトリを開いた場所で直接 mode 等を書き換えて即反映できる。
-_STRESS_CONFIG_IN_REPO = os.path.join(REPO_DIR, "stress_config.json")
-STRESS_CONFIG_PATH = (
-    _STRESS_CONFIG_IN_REPO if os.path.exists(_STRESS_CONFIG_IN_REPO)
-    else os.path.join(OUTPUT_DIR, "stress_config.json")
-)
+STRESS_CONFIG_PATH = os.path.join(OUTPUT_DIR, "stress_config.json")
 # STAI（状態不安STAI-S / 特性不安STAI-T）ラベルとセッション平均特徴の対応データセット。
 # collect モードで1セッション1レコード追記し、tune_stress.py がこれを読んでフィットする。
 STAI_DATASET_PATH = os.path.join(OUTPUT_DIR, "stai_dataset.jsonl")
@@ -226,6 +229,20 @@ RUN_MODE = "run"
 #   "full"   = 従来どおり別紙採点済みの STAI-S(20-80) をそのまま入力（既定）
 #   "short6" = 短縮版 STAI-S6(6-24) を入力し、20/6倍で 20-80 スケールに正規化
 STAI_S_FORM = "full"
+
+# --- 出力モード / ROS2 連携（stress_config.json の "output_mode" でも上書き可）---
+#   "legacy" = 従来どおり（映像表示のみ、ROS2なし）
+#   "ros2"   = ROS2へpublishのみ（映像表示なし・ヘッドレス）
+#   "both"   = 映像表示 ＋ ROS2へpublish
+OUTPUT_MODE = "legacy"
+# カメラ入力: 整数=デバイス番号 / 文字列=動画ファイルやRTSPのURL（WSLでの検証用）
+CAMERA_SOURCE = 0
+
+# 高ストレス通知: 閾値以上が ALERT_HOLD_SEC 秒以上続いたら /stress/alert を True にする
+ALERT_THRESHOLD = STRESS_HIGH_THRESHOLD
+ALERT_HOLD_SEC = 10.0
+ALERT_STALE_SEC = 3.0   # この秒数観測されない人物は判定から外す
+ALERT_MODE = "any"      # "any"=誰か1人でも / "mean"=その場全体の平均
 
 # --- STAI 質問紙（survey モード）---
 # STAI は 4 件法（各項目 1〜4）。20 項目合計で 20〜80 点になる。
