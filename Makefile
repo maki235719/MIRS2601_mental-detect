@@ -1,5 +1,5 @@
 # 定点観測ストレス評価スクリプトの開発用ショートカット
-# 使い方: make run / make clean / make clean-profiles / make clean-all / make show-profiles
+# 使い方: make run / make serve / make ros2 / make clean / make clean-profiles / make clean-all / make show-profiles
 #         make bootstrap / make deploy / make freeze / make paths   (本番=Raspberry Pi 用)
 # ※ Windows で make が無い場合は run.ps1 を使う: .\run.ps1 <target>
 #
@@ -9,14 +9,24 @@
 PYTHON ?= python
 
 .PHONY: run clean clean-profiles clean-all show-profiles help \
-        bootstrap deploy freeze paths migrate prefetch
+        bootstrap deploy freeze paths migrate prefetch serve ros2
 
 help:
-	@echo "dev  : run | clean | clean-profiles | clean-all | show-profiles | paths"
+	@echo "dev  : run | serve | ros2 | clean | clean-profiles | clean-all | show-profiles | paths"
 	@echo "prod : bootstrap | deploy | freeze | migrate | prefetch"
 
 run:
 	$(PYTHON) peroson_detect.py
+
+# 評価サーバー起動（PORT / STRESS_TOKEN は環境変数）。ブラウザで http://localhost:8000/ を開くと
+# Webカメラを疑似ロボットとして送れるテストページが出る（実ロボット不要の検証用）。
+serve:
+	$(PYTHON) stress_server.py
+
+# ROS2ノードとして起動（要 source /opt/ros/jazzy/setup.bash）。映像表示ありは ROS_MODE=both
+ROS_MODE ?= ros2
+ros2:
+	$(PYTHON) peroson_detect.py --output-mode $(ROS_MODE)
 
 # 出力先・モデル置き場を表示（リポジトリ外にあることの確認用）
 paths:

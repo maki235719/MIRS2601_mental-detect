@@ -1253,9 +1253,10 @@ def save_stress_report(stress_history):
 # メイン
 # ============================================================================
 
-def main(on_sample=None, should_stop=None, show_video=True):
+def main(on_sample=None, should_stop=None, show_video=True, cap=None):
     """on_sample(now, pid, score): ストレス算出のたびに呼ぶ（ROS2連携用）。
-    should_stop(): True を返すとループを抜ける。show_video=False で映像ウィンドウを出さない。"""
+    should_stop(): 毎フレーム末に呼ばれ、True を返すとループを抜ける。show_video=False で映像ウィンドウを出さない。
+    cap: read()/isOpened()/release() を持つ映像源（サーバー運用で受信フレームを注入する）。None ならカメラ。"""
     # チューニング済みパラメータと実行モードを最初に取り込む（無ければ雛形を作成）。
     load_stress_config()
 
@@ -1314,14 +1315,16 @@ def main(on_sample=None, should_stop=None, show_video=True):
     }
     person_baselines = {pid: bl for pid, bl in person_baselines.items() if bl is not None}
 
-    cap = cv2.VideoCapture(CAMERA_SOURCE)  # 0 = 既定のカメラ / 文字列なら動画ファイル等
+    if cap is None:
+        cap = cv2.VideoCapture(CAMERA_SOURCE)  # 0 = 既定のカメラ / 文字列なら動画ファイル等
     if not cap.isOpened():
         print("カメラを開けませんでした。デバイス番号や接続を確認してください。")
         landmarker.close()
         return
 
     frame_count = 0
-    session_start = time.time()
+    clock = getattr(cap, "now", time.time)  # 映像源が撮影/送信時刻を持つならそれを使う
+    session_start = clock()
     last_ts_ms = -1
 
     # 直近の解析状態（描画とストレス計算で共有）
@@ -1367,7 +1370,9 @@ def main(on_sample=None, should_stop=None, show_video=True):
                 break
 
             frame_count += 1
-            now = time.time()
+            now = clock()
+            if frame_count == 1:
+                session_start = now  # 映像源の時計とずれないよう最初のフレームで合わせる
             elapsed = now - session_start
 
             if prev_frame_time is not None and now > prev_frame_time:
@@ -2015,7 +2020,14 @@ def run_stai_survey(session_summaries):
 
 
 if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--output-mode", choices=["legacy", "ros2", "both"],
+                    help="config / stress_config.json の output_mode を上書き")
+    args = ap.parse_args()
     load_stress_config()  # OUTPUT_MODE を決めるため先に読む（main 内の再読込は冪等）
+    if args.output_mode:
+        OUTPUT_MODE = args.output_mode
     if OUTPUT_MODE == "legacy":
         main()
     elif OUTPUT_MODE in ("ros2", "both"):
