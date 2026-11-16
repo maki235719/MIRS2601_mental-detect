@@ -124,7 +124,7 @@ FACE_ID_EMBED_EMA = 0.1         # 登録済み埋め込みを毎回どれだけ�
 
 # --- deepface（既定・推奨）---
 FACE_ID_MODEL_DEEPFACE = "SFace"   # 軽量・高速でCPUリアルタイム向き
-FACE_ID_SIM_THRESHOLD_DEEPFACE = 0.40  # 類似度がこれ以上なら同一人物（画面のsimを見て調整）
+FACE_ID_SIM_THRESHOLD_DEEPFACE = 0.60  # 類似度がこれ以上なら同一人物（画面のsimを見て調整）
 
 # --- insightface（任意・高精度。Python3.13のWindowsでは導入が不安定）---
 FACE_ID_MODEL = "buffalo_l"     # 認識モデル: buffalo_s=軽量, buffalo_l=高精度
